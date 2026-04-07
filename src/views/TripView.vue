@@ -6,22 +6,16 @@
         <div class="subtitle">输入轨迹 ID，还原真实行驶路径并标注拥堵（红）/畅通（绿）。</div>
       </div>
       <div class="controls">
-        <input
-          v-model.trim="tripId"
-          class="input"
-          list="trip-id-options"
+        <SearchSelect
+          v-model="tripId"
+          :fetch-options="fetchTripSuggestions"
           placeholder="选择或输入 trip_id，例如 286254"
-          @focus="loadTripOptions()"
-          @input="loadTripOptions(tripId)"
         />
-        <datalist id="trip-id-options">
-          <option v-for="id in tripOptions" :key="id" :value="String(id)">{{ id }}</option>
-        </datalist>
+        <button class="btn" :disabled="!tripId || loading" @click="loadTrip">查询</button>
         <label class="label">
           拥堵阈值(km/h)
           <input v-model.number="congestionKph" type="number" class="input small" min="0" max="200" />
         </label>
-        <button class="btn" :disabled="!tripId || loading" @click="loadTrip">查询</button>
       </div>
     </div>
 
@@ -54,6 +48,7 @@
 import { onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
+import SearchSelect from '@/components/SearchSelect.vue'
 import AmapTripMap from '@/components/AmapTripMap.vue'
 
 const route = useRoute()
@@ -62,7 +57,6 @@ const tripId = ref('286254')
 const congestionKph = ref(20)
 const loading = ref(false)
 const error = ref('')
-const tripOptions = ref([])
 
 const trip = ref(null)
 const segments = ref([])
@@ -103,21 +97,16 @@ async function loadTrip() {
   }
 }
 
-async function loadTripOptions(keyword = '') {
-  try {
-    const resp = await api.get('/api/meta/trip-ids', {
-      params: { q: keyword || '', limit: 200 },
-    })
-    tripOptions.value = resp.data || []
-  } catch {
-    tripOptions.value = []
-  }
+async function fetchTripSuggestions(keyword = '') {
+  const resp = await api.get('/api/meta/trip-ids', {
+    params: { q: keyword || '' },
+  })
+  return resp.data || []
 }
 
 onMounted(() => {
   const qid = route.query?.id
   if (qid) tripId.value = String(qid)
-  loadTripOptions(tripId.value)
   if (tripId.value) loadTrip()
 })
 
@@ -134,11 +123,11 @@ watch(
 <style scoped>
 .page {
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 .header {
   display: flex;
-  gap: 12px;
+  gap: 16px;
   justify-content: space-between;
   align-items: flex-start;
   flex-wrap: wrap;
@@ -149,56 +138,67 @@ watch(
 }
 .subtitle {
   margin-top: 4px;
-  opacity: 0.7;
+  color: var(--text-muted);
   font-size: 12px;
 }
 .controls {
   display: flex;
   gap: 10px;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  width: 100%;
+  min-width: 0;
 }
 .input {
   height: 36px;
   padding: 0 10px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: #e6edf3;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text);
   outline: none;
 }
 .input.small {
-  width: 110px;
+  width: 92px;
 }
 .select {
   height: 10px;
   width: 140px;
   padding: 0 10px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: #e6edf3;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text);
   outline: none;
 }
 .label {
   display: flex;
   gap: 8px;
   align-items: center;
-  opacity: 0.9;
+  color: var(--text-muted);
   font-size: 12px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .btn {
   height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid rgba(79, 70, 229, 0.42);
-  background: rgba(79, 70, 229, 0.24);
-  color: #e6edf3;
+  border: 1px solid rgba(79, 124, 255, 0.22);
+  background: rgba(79, 124, 255, 0.1);
+  color: var(--text);
   cursor: pointer;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+}
+.btn:hover:not(:disabled) {
+  border-color: rgba(79, 124, 255, 0.3);
+  background: rgba(79, 124, 255, 0.14);
 }
 .grid {
   display: grid;
@@ -206,38 +206,49 @@ watch(
   gap: 12px;
 }
 .card {
-  border-radius: 14px;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-3));
+  box-shadow: var(--shadow-sm);
 }
 .card-title {
   font-weight: 700;
   margin-bottom: 10px;
+  color: var(--text);
 }
 .info .kv {
   display: flex;
   justify-content: space-between;
   gap: 10px;
   padding: 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 .info .kv span {
-  opacity: 0.75;
+  color: var(--text-muted);
 }
 .muted {
-  opacity: 0.7;
+  color: var(--text-muted);
 }
 .error {
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fecaca;
+  border: 1px solid rgba(228, 106, 128, 0.22);
+  background: rgba(228, 106, 128, 0.08);
+  color: #ffd6df;
 }
 @media (max-width: 1100px) {
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .controls {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .label {
+    white-space: normal;
   }
 }
 </style>

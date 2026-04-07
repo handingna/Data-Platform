@@ -224,52 +224,56 @@ async def fetch_car_trips(db: AsyncSession, device_id: str, limit: int = 200) ->
     return out
 
 
-async def search_trip_ids(db: AsyncSession, q: str = "", limit: int = 100) -> list[int]:
+async def search_trip_ids(db: AsyncSession, q: str = "", limit: int | None = None) -> list[int]:
     if q.strip():
-        query = text(
-            """
+        sql = """
             SELECT DISTINCT trip_id
             FROM public.trip_data
             WHERE CAST(trip_id AS TEXT) ILIKE :kw
             ORDER BY trip_id DESC
-            LIMIT :limit
-            """
-        )
-        rows = (await db.execute(query, {"kw": f"%{q.strip()}%", "limit": limit})).all()
+        """
+        params: dict[str, Any] = {"kw": f"%{q.strip()}%"}
+        if limit is not None:
+            sql += "\n            LIMIT :limit"
+            params["limit"] = limit
+        rows = (await db.execute(text(sql), params)).all()
     else:
-        query = text(
-            """
+        sql = """
             SELECT DISTINCT trip_id
             FROM public.trip_data
             ORDER BY trip_id DESC
-            LIMIT :limit
-            """
-        )
-        rows = (await db.execute(query, {"limit": limit})).all()
+        """
+        params: dict[str, Any] = {}
+        if limit is not None:
+            sql += "\n            LIMIT :limit"
+            params["limit"] = limit
+        rows = (await db.execute(text(sql), params)).all()
     return [int(r[0]) for r in rows]
 
 
-async def search_device_ids(db: AsyncSession, q: str = "", limit: int = 100) -> list[str]:
+async def search_device_ids(db: AsyncSession, q: str = "", limit: int | None = None) -> list[str]:
     if q.strip():
-        query = text(
-            """
+        sql = """
             SELECT device_id
             FROM public.car
             WHERE device_id ILIKE :kw
             ORDER BY device_id
-            LIMIT :limit
-            """
-        )
-        rows = (await db.execute(query, {"kw": f"%{q.strip()}%", "limit": limit})).all()
+        """
+        params: dict[str, Any] = {"kw": f"%{q.strip()}%"}
+        if limit is not None:
+            sql += "\n            LIMIT :limit"
+            params["limit"] = limit
+        rows = (await db.execute(text(sql), params)).all()
     else:
-        query = text(
-            """
+        sql = """
             SELECT device_id
             FROM public.car
             ORDER BY device_id
-            LIMIT :limit
-            """
-        )
-        rows = (await db.execute(query, {"limit": limit})).all()
+        """
+        params: dict[str, Any] = {}
+        if limit is not None:
+            sql += "\n            LIMIT :limit"
+            params["limit"] = limit
+        rows = (await db.execute(text(sql), params)).all()
     return [str(r[0]) for r in rows]
 

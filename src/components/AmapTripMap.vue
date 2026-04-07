@@ -352,8 +352,8 @@ onBeforeUnmount(() => {
   height: 560px;
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  background: var(--surface-0);
   position: relative;
 }
 .map {
@@ -364,18 +364,18 @@ onBeforeUnmount(() => {
   position: absolute;
   right: 12px;
   bottom: 12px;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(255, 255, 255, 0.96);
   padding: 10px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
   width: 240px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-md);
 }
 .playback-handle {
   width: 48px;
   height: 6px;
-  background: rgba(255, 255, 255, 0.6);
+  background: rgba(148, 163, 184, 0.52);
   border-radius: 4px;
   margin: 0 auto 8px;
   cursor: grab;
@@ -408,9 +408,9 @@ onBeforeUnmount(() => {
   flex: 1;
   height: 32px;
   border-radius: 10px;
-  border: 1px solid rgba(79, 70, 229, 0.35);
-  background: rgba(79, 70, 229, 0.3);
-  color: #e6edf3;
+  border: 1px solid rgba(79, 124, 255, 0.22);
+  background: rgba(79, 124, 255, 0.1);
+  color: var(--text);
   cursor: pointer;
 }
 .ctrl:disabled {
@@ -420,20 +420,20 @@ onBeforeUnmount(() => {
 .progress {
   margin-top: 8px;
   height: 6px;
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(148, 163, 184, 0.18);
   border-radius: 6px;
   overflow: hidden;
 }
 .progress-bar {
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, #22c55e, #3b82f6);
+  background: linear-gradient(90deg, rgba(47, 159, 103, 0.78), rgba(79, 124, 255, 0.72));
   transition: width 0.12s linear;
 }
 .status {
   margin-top: 6px;
   font-size: 12px;
-  opacity: 0.85;
+  color: var(--text-muted);
 }
 :deep(.label-marker) {
   padding: 4px 8px;
@@ -441,29 +441,29 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.14);
 }
 :deep(.label-marker.start) {
-  background: linear-gradient(135deg, #10b981, #22c55e);
+  background: linear-gradient(135deg, #2f9f67, #55b17f);
 }
 :deep(.label-marker.end) {
-  background: linear-gradient(135deg, #ef4444, #f97316);
+  background: linear-gradient(135deg, #d95b73, #f08a5d);
 }
 :deep(.arrow-marker) {
   width: 0;
   height: 0;
   border-top: 7px solid transparent;
   border-bottom: 7px solid transparent;
-  border-left: 12px solid #22c55e;
+  border-left: 12px solid #2f9f67;
   transform-origin: center;
 }
 :deep(.car-marker) {
   width: 20px;
   height: 20px;
   border-radius: 6px;
-  background: linear-gradient(135deg, #60a5fa, #1d4ed8);
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(135deg, #7fa6ff, #4f7cff);
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
 }
 </style>
 

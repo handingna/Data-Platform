@@ -6,17 +6,11 @@
         <div class="subtitle">输入车辆 ID，查看订单(轨迹)列表，以及按 2 小时统计的轨迹数/里程。</div>
       </div>
       <div class="controls">
-        <input
-          v-model.trim="deviceId"
-          class="input"
-          list="device-id-options"
+        <SearchSelect
+          v-model="deviceId"
+          :fetch-options="fetchDeviceSuggestions"
           placeholder="选择或输入 device_id，例如 100032066"
-          @focus="loadDeviceOptions()"
-          @input="loadDeviceOptions(deviceId)"
         />
-        <datalist id="device-id-options">
-          <option v-for="id in deviceOptions" :key="id" :value="id">{{ id }}</option>
-        </datalist>
         <button class="btn" :disabled="!deviceId || loading" @click="loadCar">查询</button>
       </div>
     </div>
@@ -70,10 +64,11 @@
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import { api } from '@/lib/api'
+import SearchSelect from '@/components/SearchSelect.vue'
 
 const router = useRouter()
 
@@ -83,7 +78,6 @@ const error = ref('')
 
 const car = ref(null)
 const trips = ref([])
-const deviceOptions = ref([])
 
 const chartTripsEl = ref(null)
 const chartDistEl = ref(null)
@@ -130,21 +124,21 @@ function renderCharts() {
 
   chartTrips.setOption({
     backgroundColor: 'transparent',
-    title: { text: '轨迹数', textStyle: { color: '#e6edf3', fontSize: 12 } },
+    title: { text: '轨迹数', textStyle: { color: '#102033', fontSize: 12 } },
     grid: baseGrid,
-    xAxis: { type: 'category', data: labels, axisLabel: { color: 'rgba(230,237,243,0.7)' } },
-    yAxis: { type: 'value', axisLabel: { color: 'rgba(230,237,243,0.7)' }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } } },
-    series: [{ type: 'bar', data: tripCounts, itemStyle: { color: 'rgba(79,70,229,0.75)' }, barMaxWidth: 26 }],
+    xAxis: { type: 'category', data: labels, axisLabel: { color: 'rgba(16,32,51,0.7)' } },
+    yAxis: { type: 'value', axisLabel: { color: 'rgba(16,32,51,0.7)' }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.14)' } } },
+    series: [{ type: 'bar', data: tripCounts, itemStyle: { color: 'rgba(79,124,255,0.7)' }, barMaxWidth: 26 }],
     tooltip: { trigger: 'axis' },
   })
 
   chartDist.setOption({
     backgroundColor: 'transparent',
-    title: { text: '里程(km)', textStyle: { color: '#e6edf3', fontSize: 12 } },
+    title: { text: '里程(km)', textStyle: { color: '#102033', fontSize: 12 } },
     grid: baseGrid,
-    xAxis: { type: 'category', data: labels, axisLabel: { color: 'rgba(230,237,243,0.7)' } },
-    yAxis: { type: 'value', axisLabel: { color: 'rgba(230,237,243,0.7)' }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } } },
-    series: [{ type: 'line', data: dists, smooth: true, symbolSize: 6, lineStyle: { width: 3, color: 'rgba(34,197,94,0.9)' }, itemStyle: { color: 'rgba(34,197,94,0.9)' } }],
+    xAxis: { type: 'category', data: labels, axisLabel: { color: 'rgba(16,32,51,0.7)' } },
+    yAxis: { type: 'value', axisLabel: { color: 'rgba(16,32,51,0.7)' }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.14)' } } },
+    series: [{ type: 'line', data: dists, smooth: true, symbolSize: 6, lineStyle: { width: 3, color: 'rgba(47,159,103,0.72)' }, itemStyle: { color: 'rgba(47,159,103,0.72)' } }],
     tooltip: { trigger: 'axis' },
   })
 
@@ -177,20 +171,12 @@ async function loadCar() {
   }
 }
 
-async function loadDeviceOptions(keyword = '') {
-  try {
-    const resp = await api.get('/api/meta/device-ids', {
-      params: { q: keyword || '', limit: 200 },
-    })
-    deviceOptions.value = resp.data || []
-  } catch {
-    deviceOptions.value = []
-  }
+async function fetchDeviceSuggestions(keyword = '') {
+  const resp = await api.get('/api/meta/device-ids', {
+    params: { q: keyword || '' },
+  })
+  return resp.data || []
 }
-
-onMounted(() => {
-  loadDeviceOptions(deviceId.value)
-})
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
@@ -202,11 +188,11 @@ onBeforeUnmount(() => {
 <style scoped>
 .page {
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 .header {
   display: flex;
-  gap: 12px;
+  gap: 16px;
   justify-content: space-between;
   align-items: flex-start;
   flex-wrap: wrap;
@@ -217,36 +203,45 @@ onBeforeUnmount(() => {
 }
 .subtitle {
   margin-top: 4px;
-  opacity: 0.7;
+  color: var(--text-muted);
   font-size: 12px;
 }
 .controls {
   display: flex;
   gap: 10px;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  width: 100%;
+  min-width: 0;
 }
 .input {
   height: 36px;
   padding: 0 10px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: #e6edf3;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  color: var(--text);
   outline: none;
 }
 .btn {
   height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid rgba(79, 70, 229, 0.42);
-  background: rgba(79, 70, 229, 0.24);
-  color: #e6edf3;
+  border: 1px solid rgba(79, 124, 255, 0.22);
+  background: rgba(79, 124, 255, 0.1);
+  color: var(--text);
   cursor: pointer;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+}
+.btn:hover:not(:disabled) {
+  border-color: rgba(79, 124, 255, 0.3);
+  background: rgba(79, 124, 255, 0.14);
 }
 .grid {
   display: grid;
@@ -254,14 +249,16 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 .card {
-  border-radius: 14px;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  box-shadow: var(--shadow-sm);
 }
 .card-title {
   font-weight: 700;
   margin-bottom: 10px;
+  color: var(--text);
 }
 .charts {
   display: grid;
@@ -271,28 +268,28 @@ onBeforeUnmount(() => {
 .chart {
   height: 300px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.9);
 }
 .info .kv {
   display: flex;
   justify-content: space-between;
   gap: 10px;
   padding: 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 .info .kv span {
-  opacity: 0.75;
+  color: var(--text-muted);
 }
 .muted {
-  opacity: 0.7;
+  color: var(--text-muted);
 }
 .error {
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fecaca;
+  border: 1px solid rgba(217, 91, 115, 0.2);
+  background: rgba(217, 91, 115, 0.08);
+  color: #9f1f3d;
 }
 .table {
   width: 100%;
@@ -303,16 +300,16 @@ onBeforeUnmount(() => {
   grid-template-columns: 110px 110px 110px 110px 1fr 1fr;
   gap: 12px;
   padding: 10px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
   min-width: 860px;
 }
 .tr.head {
-  opacity: 0.75;
+  color: var(--text-muted);
   font-size: 12px;
 }
 .click {
   cursor: pointer;
-  color: #93c5fd;
+  color: var(--primary);
 }
 @media (max-width: 1100px) {
   .grid {
@@ -320,6 +317,11 @@ onBeforeUnmount(() => {
   }
   .charts {
     grid-template-columns: 1fr;
+  }
+
+  .controls {
+    flex-wrap: wrap;
+    align-items: center;
   }
 }
 </style>

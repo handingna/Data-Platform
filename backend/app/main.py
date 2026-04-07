@@ -77,7 +77,7 @@ async def get_car_trips(
 @app.get("/api/meta/trip-ids", response_model=list[int])
 async def get_trip_ids(
     q: str = Query("", description="keyword for fuzzy search"),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int | None = Query(default=None, ge=1, le=1000000),
     db: AsyncSession = Depends(get_db),
 ) -> list[int]:
     return await search_trip_ids(db, q=q, limit=limit)
@@ -86,7 +86,7 @@ async def get_trip_ids(
 @app.get("/api/meta/device-ids", response_model=list[str])
 async def get_device_ids(
     q: str = Query("", description="keyword for fuzzy search"),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int | None = Query(default=None, ge=1, le=1000000),
     db: AsyncSession = Depends(get_db),
 ) -> list[str]:
     return await search_device_ids(db, q=q, limit=limit)
