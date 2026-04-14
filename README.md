@@ -13,6 +13,20 @@ docker pull theadoratang722/trajdb-image
 docker run -d -p 5433:5432 theadoratang722/trajdb-image
 ```
 
+
+
+mission1v1 下载镜像
+```bash
+docker pull handingna/trajdb-image:m1v1
+```
+
+```bash
+docker run -d -p 5433:5432 handingna/trajdb-image:m1v1
+```
+密码：password
+
+
+
 ## 2) 配置后端数据库连接
 docker链接 密码后续可能修改 现在先不用动，这步忽略
 
