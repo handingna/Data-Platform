@@ -300,7 +300,6 @@ onBeforeUnmount(() => {
   height: 14px;
 }
 
-
 .search-select__clear {
   right: 8px;
   width: 22px;
@@ -358,6 +357,3 @@ onBeforeUnmount(() => {
   cursor: default;
 }
 </style>
-
-
-

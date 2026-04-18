@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import math
 from datetime import date
 from typing import Any
@@ -7,7 +8,25 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .schemas import CarProfile, CarTripsItem, Segment, TripDetail, TripSegmentsResponse, TripSummary, TripPoint
+from .diagnosis import analyze_trip_diagnosis
+from .schemas import (
+    AnomalyEventCount,
+    AnomalyRoadDistributionItem,
+    AnomalyRoadDistributionResponse,
+    AnomalyVehicleRankingItem,
+    AnomalyVehicleRankingResponse,
+    CarProfile,
+    CarTripsItem,
+    Segment,
+    TripDetail,
+    TripDiagnosisResponse,
+    TripPoint,
+    TripSegmentsResponse,
+    TripSummary,
+)
+
+ANOMALY_TYPE_ORDER = ["detour", "stop", "speed_jump", "drift", "jump_point"]
+SEVERITY_WEIGHT = {"low": 1, "medium": 2, "high": 3}
 
 
 def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -40,33 +59,20 @@ def _two_hour_bins() -> list[tuple[int, int, str]]:
     return bins
 
 
-async def fetch_trip_by_id(db: AsyncSession, trip_id: int) -> TripDetail | None:
-    # partitioned table: PK(trip_id, log_date). trip_id should be unique by sequence,
-    # but we still defensively pick the newest log_date.
-    q = text(
-        """
-        SELECT trip_id, log_date, devid, lon, lat, tms, distance_km, duration, start_time, end_time, speed_array
-        FROM public.trip_data
-        WHERE trip_id = :trip_id
-        ORDER BY log_date DESC
-        LIMIT 1
-        """
-    )
-    row = (await db.execute(q, {"trip_id": trip_id})).mappings().first()
-    if not row:
-        return None
-
+def _trip_detail_from_row(row: Any) -> TripDetail:
     lon_arr = list(row.get("lon") or [])
     lat_arr = list(row.get("lat") or [])
     tms_arr = list(row.get("tms") or [])
     speed_arr = list(row.get("speed_array") or [])
+    road_arr = list(row.get("roads") or [])
 
     n = min(len(lon_arr), len(lat_arr))
     points: list[TripPoint] = []
     for i in range(n):
         t = float(tms_arr[i]) if i < len(tms_arr) and tms_arr[i] is not None else None
         sp = float(speed_arr[i]) if i < len(speed_arr) and speed_arr[i] is not None else None
-        points.append(TripPoint(lon=float(lon_arr[i]), lat=float(lat_arr[i]), t=t, speed_kph=sp))
+        road_id = int(road_arr[i]) if i < len(road_arr) and road_arr[i] is not None else None
+        points.append(TripPoint(lon=float(lon_arr[i]), lat=float(lat_arr[i]), t=t, speed_kph=sp, road_id=road_id))
 
     duration_s = _duration_seconds_from_interval(row.get("duration"))
     distance_km = float(row["distance_km"]) if row.get("distance_km") is not None else None
@@ -85,6 +91,302 @@ async def fetch_trip_by_id(db: AsyncSession, trip_id: int) -> TripDetail | None:
         end_time=row.get("end_time"),
         avg_speed_kph=avg_speed,
         points=points,
+    )
+
+
+def _ordered_anomaly_counts(counter: Counter[str]) -> list[AnomalyEventCount]:
+    return [
+        AnomalyEventCount(type=event_type, count=int(counter.get(event_type, 0)))
+        for event_type in ANOMALY_TYPE_ORDER
+    ]
+
+
+def _midpoint(start: tuple[float, float], end: tuple[float, float]) -> tuple[float, float]:
+    return ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+
+
+def _merge_diagnosis_road_occurrences(diagnosis: TripDiagnosisResponse) -> list[dict[str, Any]]:
+    occurrences: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current is None:
+            return
+        current["avg_speed_kph"] = (
+            round(current["speed_sum"] / current["speed_count"], 2)
+            if current["speed_count"] > 0
+            else None
+        )
+        current["center_point"] = _midpoint(current["start_point"], current["end_point"])
+        occurrences.append(current)
+        current = None
+
+    for segment in diagnosis.segments:
+        if segment.type == "normal" or segment.road_id is None:
+            flush()
+            continue
+
+        if (
+            current is not None
+            and current["road_id"] == segment.road_id
+            and current["type"] == segment.type
+            and current["end_index"] == segment.start_index
+        ):
+            current["end_point"] = tuple(segment.end)
+            current["end_index"] = segment.end_index
+            current["segment_count"] += 1
+            if segment.speed_kph is not None:
+                current["speed_sum"] += float(segment.speed_kph)
+                current["speed_count"] += 1
+            if SEVERITY_WEIGHT[segment.severity] > SEVERITY_WEIGHT[current["max_severity"]]:
+                current["max_severity"] = segment.severity
+            continue
+
+        flush()
+        current = {
+            "road_id": int(segment.road_id),
+            "trip_id": diagnosis.trip.trip_id,
+            "type": segment.type,
+            "max_severity": segment.severity,
+            "start_point": tuple(segment.start),
+            "end_point": tuple(segment.end),
+            "start_index": segment.start_index,
+            "end_index": segment.end_index,
+            "segment_count": 1,
+            "speed_sum": float(segment.speed_kph) if segment.speed_kph is not None else 0.0,
+            "speed_count": 1 if segment.speed_kph is not None else 0,
+        }
+
+    flush()
+    return occurrences
+
+
+def summarize_anomaly_road_distribution(
+    diagnoses: list[TripDiagnosisResponse],
+    sample_trip_count: int,
+    limit: int = 12,
+) -> AnomalyRoadDistributionResponse:
+    aggregates: dict[int, dict[str, Any]] = {}
+
+    for diagnosis in diagnoses:
+        for occurrence in _merge_diagnosis_road_occurrences(diagnosis):
+            road_id = int(occurrence["road_id"])
+            bucket = aggregates.setdefault(
+                road_id,
+                {
+                    "occurrence_count": 0,
+                    "trip_ids": set(),
+                    "type_counter": Counter(),
+                    "max_severity": "low",
+                    "speed_sum": 0.0,
+                    "speed_count": 0,
+                    "representative": occurrence,
+                },
+            )
+            bucket["occurrence_count"] += 1
+            bucket["trip_ids"].add(int(occurrence["trip_id"]))
+            bucket["type_counter"].update([occurrence["type"]])
+            if occurrence["avg_speed_kph"] is not None:
+                bucket["speed_sum"] += float(occurrence["avg_speed_kph"])
+                bucket["speed_count"] += 1
+
+            severity = occurrence["max_severity"]
+            if SEVERITY_WEIGHT[severity] > SEVERITY_WEIGHT[bucket["max_severity"]]:
+                bucket["max_severity"] = severity
+
+            representative = bucket["representative"]
+            replace_representative = (
+                SEVERITY_WEIGHT[severity] > SEVERITY_WEIGHT[representative["max_severity"]]
+                or (
+                    SEVERITY_WEIGHT[severity] == SEVERITY_WEIGHT[representative["max_severity"]]
+                    and occurrence["segment_count"] > representative["segment_count"]
+                )
+            )
+            if replace_representative:
+                bucket["representative"] = occurrence
+
+    items: list[AnomalyRoadDistributionItem] = []
+    for road_id, bucket in aggregates.items():
+        representative = bucket["representative"]
+        type_counter: Counter[str] = bucket["type_counter"]
+        dominant_type = type_counter.most_common(1)[0][0] if type_counter else None
+        avg_speed = (
+            round(bucket["speed_sum"] / bucket["speed_count"], 2)
+            if bucket["speed_count"] > 0
+            else representative["avg_speed_kph"]
+        )
+        items.append(
+            AnomalyRoadDistributionItem(
+                road_id=road_id,
+                occurrence_count=int(bucket["occurrence_count"]),
+                trip_count=len(bucket["trip_ids"]),
+                dominant_type=dominant_type,
+                max_severity=bucket["max_severity"],
+                avg_speed_kph=avg_speed,
+                sample_trip_id=int(representative["trip_id"]),
+                start_point=tuple(representative["start_point"]),
+                end_point=tuple(representative["end_point"]),
+                center_point=tuple(representative["center_point"]),
+                event_counts=_ordered_anomaly_counts(type_counter),
+            )
+        )
+
+    items.sort(
+        key=lambda item: (
+            -item.occurrence_count,
+            -SEVERITY_WEIGHT.get(item.max_severity or "low", 0),
+            -item.trip_count,
+            item.road_id,
+        )
+    )
+
+    return AnomalyRoadDistributionResponse(
+        sample_trip_count=sample_trip_count,
+        road_count=len(items),
+        items=items[:limit],
+    )
+
+
+async def fetch_trip_by_id(db: AsyncSession, trip_id: int) -> TripDetail | None:
+    # partitioned table: PK(trip_id, log_date). trip_id should be unique by sequence,
+    # but we still defensively pick the newest log_date.
+    q = text(
+        """
+        SELECT trip_id, log_date, devid, lon, lat, tms, roads, distance_km, duration, start_time, end_time, speed_array
+        FROM public.trip_data
+        WHERE trip_id = :trip_id
+        ORDER BY log_date DESC
+        LIMIT 1
+        """
+    )
+    row = (await db.execute(q, {"trip_id": trip_id})).mappings().first()
+    if not row:
+        return None
+    return _trip_detail_from_row(row)
+
+
+async def fetch_trip_diagnosis(db: AsyncSession, trip_id: int) -> TripDiagnosisResponse | None:
+    trip = await fetch_trip_by_id(db, trip_id)
+    if trip is None or len(trip.points) < 2:
+        return None
+    return analyze_trip_diagnosis(trip)
+
+
+async def fetch_anomaly_road_distribution(
+    db: AsyncSession,
+    limit: int = 12,
+    trip_sample: int = 300,
+) -> AnomalyRoadDistributionResponse:
+    q = text(
+        """
+        SELECT trip_id, log_date, devid, lon, lat, tms, roads, distance_km, duration, start_time, end_time, speed_array
+        FROM public.trip_data
+        WHERE array_length(lon, 1) >= 2
+        ORDER BY trip_id DESC
+        LIMIT :trip_sample
+        """
+    )
+    rows = (await db.execute(q, {"trip_sample": trip_sample})).mappings().all()
+
+    diagnoses: list[TripDiagnosisResponse] = []
+    for row in rows:
+        trip = _trip_detail_from_row(row)
+        if len(trip.points) < 2:
+            continue
+        diagnoses.append(analyze_trip_diagnosis(trip))
+
+    return summarize_anomaly_road_distribution(
+        diagnoses=diagnoses,
+        sample_trip_count=len(rows),
+        limit=limit,
+    )
+
+
+async def fetch_anomaly_vehicle_ranking(
+    db: AsyncSession,
+    limit: int = 10,
+    trip_sample: int = 300,
+    per_vehicle: int = 5,
+) -> AnomalyVehicleRankingResponse:
+    q = text(
+        """
+        SELECT trip_id, log_date, devid, lon, lat, tms, roads, distance_km, duration, start_time, end_time, speed_array
+        FROM public.trip_data
+        WHERE array_length(lon, 1) >= 2
+        ORDER BY trip_id DESC
+        LIMIT :trip_sample
+        """
+    )
+    rows = (await db.execute(q, {"trip_sample": trip_sample})).mappings().all()
+
+    picked_per_vehicle: dict[str, int] = {}
+    aggregates: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        device_id = str(row.get("devid")) if row.get("devid") is not None else ""
+        if not device_id:
+            continue
+        if picked_per_vehicle.get(device_id, 0) >= per_vehicle:
+            continue
+
+        trip = _trip_detail_from_row(row)
+        if len(trip.points) < 2:
+            continue
+
+        diagnosis = analyze_trip_diagnosis(trip)
+        picked_per_vehicle[device_id] = picked_per_vehicle.get(device_id, 0) + 1
+
+        bucket = aggregates.setdefault(
+            device_id,
+            {
+                "trip_count": 0,
+                "total_events": 0,
+                "high_risk_trips": 0,
+                "score_sum": 0.0,
+                "worst_trip_id": None,
+                "worst_score": 101,
+                "worst_risk_level": None,
+                "type_counter": Counter(),
+            },
+        )
+        bucket["trip_count"] += 1
+        bucket["total_events"] += diagnosis.summary.total_events
+        bucket["score_sum"] += diagnosis.summary.anomaly_score
+        if diagnosis.summary.risk_level == "high":
+            bucket["high_risk_trips"] += 1
+        if diagnosis.summary.anomaly_score < bucket["worst_score"]:
+            bucket["worst_score"] = diagnosis.summary.anomaly_score
+            bucket["worst_trip_id"] = diagnosis.trip.trip_id
+            bucket["worst_risk_level"] = diagnosis.summary.risk_level
+        bucket["type_counter"].update(event.type for event in diagnosis.events)
+
+    items: list[AnomalyVehicleRankingItem] = []
+    for device_id, bucket in aggregates.items():
+        if bucket["total_events"] <= 0:
+            continue
+        type_counter: Counter[str] = bucket["type_counter"]
+        dominant_type = type_counter.most_common(1)[0][0] if type_counter else None
+        items.append(
+            AnomalyVehicleRankingItem(
+                device_id=device_id,
+                trip_count=int(bucket["trip_count"]),
+                total_events=int(bucket["total_events"]),
+                high_risk_trips=int(bucket["high_risk_trips"]),
+                avg_anomaly_score=round(bucket["score_sum"] / max(bucket["trip_count"], 1), 2),
+                worst_trip_id=bucket["worst_trip_id"],
+                worst_risk_level=bucket["worst_risk_level"],
+                dominant_type=dominant_type,
+                event_counts=_ordered_anomaly_counts(type_counter),
+            )
+        )
+
+    items.sort(key=lambda item: (-item.total_events, -item.high_risk_trips, item.avg_anomaly_score, -item.trip_count))
+
+    return AnomalyVehicleRankingResponse(
+        sample_trip_count=len(rows),
+        vehicle_count=len(items),
+        items=items[:limit],
     )
 
 

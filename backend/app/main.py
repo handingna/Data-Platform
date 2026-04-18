@@ -6,11 +6,23 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .schemas import CarProfile, CarTripsItem, HealthResponse, TripDetail, TripSegmentsResponse
+from .schemas import (
+    AnomalyRoadDistributionResponse,
+    AnomalyVehicleRankingResponse,
+    CarProfile,
+    CarTripsItem,
+    HealthResponse,
+    TripDetail,
+    TripDiagnosisResponse,
+    TripSegmentsResponse,
+)
 from .services import (
+    fetch_anomaly_road_distribution,
+    fetch_anomaly_vehicle_ranking,
     fetch_car_profile,
     fetch_car_trips,
     fetch_trip_by_id,
+    fetch_trip_diagnosis,
     fetch_trip_segments,
     search_device_ids,
     search_trip_ids,
@@ -43,6 +55,33 @@ async def get_trip(trip_id: int, db: AsyncSession = Depends(get_db)) -> TripDeta
     if not trip:
         raise HTTPException(status_code=404, detail="trip not found")
     return trip
+
+
+@app.get("/api/trips/{trip_id}/diagnosis", response_model=TripDiagnosisResponse)
+async def get_trip_diagnosis(trip_id: int, db: AsyncSession = Depends(get_db)) -> TripDiagnosisResponse:
+    diagnosis = await fetch_trip_diagnosis(db, trip_id)
+    if not diagnosis:
+        raise HTTPException(status_code=404, detail="trip not found or not enough points")
+    return diagnosis
+
+
+@app.get("/api/anomaly/vehicles", response_model=AnomalyVehicleRankingResponse)
+async def get_anomaly_vehicle_ranking(
+    limit: int = Query(default=10, ge=1, le=50),
+    trip_sample: int = Query(default=300, ge=50, le=2000),
+    per_vehicle: int = Query(default=5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+) -> AnomalyVehicleRankingResponse:
+    return await fetch_anomaly_vehicle_ranking(db, limit=limit, trip_sample=trip_sample, per_vehicle=per_vehicle)
+
+
+@app.get("/api/anomaly/roads", response_model=AnomalyRoadDistributionResponse)
+async def get_anomaly_road_distribution(
+    limit: int = Query(default=12, ge=1, le=50),
+    trip_sample: int = Query(default=300, ge=50, le=2000),
+    db: AsyncSession = Depends(get_db),
+) -> AnomalyRoadDistributionResponse:
+    return await fetch_anomaly_road_distribution(db, limit=limit, trip_sample=trip_sample)
 
 
 @app.get("/api/trips/{trip_id}/segments", response_model=TripSegmentsResponse)

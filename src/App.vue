@@ -5,17 +5,15 @@
         <div class="brand-mark">T</div>
         <div>
           <div class="brand-title">Traffic 中台</div>
-          <div class="brand-subtitle">企业服务 · 轨迹数据</div>
+          <div class="brand-subtitle">运营服务 · 轨迹数据</div>
         </div>
       </div>
+
       <nav class="nav">
-        <RouterLink class="nav-item" to="/trip">轨迹分析</RouterLink>
+        <RouterLink class="nav-item" to="/trip">行程分析</RouterLink>
         <RouterLink class="nav-item" to="/car">车辆画像</RouterLink>
+        <RouterLink class="nav-item" to="/anomaly">异常诊断</RouterLink>
       </nav>
-<!--      <div class="hint">-->
-<!--        后端：<code>localhost:8000</code><br />-->
-<!--        前端：<code>localhost:8081</code>-->
-<!--      </div>-->
     </aside>
 
     <main class="main">
@@ -39,12 +37,14 @@
     linear-gradient(180deg, var(--bg-0), var(--bg-1));
   overflow: hidden;
 }
+
 .sidebar {
   padding: 20px;
   border-right: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.76);
   backdrop-filter: blur(12px);
 }
+
 .brand {
   display: flex;
   align-items: center;
@@ -56,6 +56,7 @@
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -66,19 +67,23 @@
   color: #fff;
   font-weight: 700;
 }
+
 .brand-title {
   font-size: 15px;
   font-weight: 700;
 }
+
 .brand-subtitle {
   margin-top: 2px;
   font-size: 12px;
   color: var(--text-muted);
 }
+
 .nav {
   display: grid;
   gap: 10px;
 }
+
 .nav-item {
   display: block;
   padding: 12px 14px;
@@ -88,24 +93,22 @@
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid var(--border);
 }
+
 .nav-item:hover {
   background: rgba(79, 124, 255, 0.08);
   border-color: rgba(79, 124, 255, 0.22);
 }
+
 .nav-item.router-link-active {
   background: rgba(79, 124, 255, 0.12);
   border-color: rgba(79, 124, 255, 0.26);
 }
-.hint {
-  margin-top: 16px;
-  opacity: 0.8;
-  font-size: 12px;
-  line-height: 1.6;
-}
+
 .main {
   padding: 22px;
   overflow: auto;
 }
+
 .main :deep(.page) {
   max-width: 1600px;
   margin: 0 auto;

@@ -2,6 +2,13 @@
   <div class="map-wrap">
     <div ref="el" class="map"></div>
 
+    <div class="legend">
+      <div v-for="item in legendItems" :key="item.type" class="legend-item">
+        <span class="legend-color" :style="{ backgroundColor: item.color }"></span>
+        <span>{{ item.label }}</span>
+      </div>
+    </div>
+
     <div class="playback-panel" ref="panelEl" :style="panelStyle">
       <div class="playback-handle" @pointerdown.prevent="startPanelDrag"></div>
 
@@ -11,6 +18,8 @@
         </button>
         <button class="ctrl" :disabled="!hasPath" @click="resetPlayback">重置</button>
       </div>
+
+      <button class="ctrl jump" :disabled="!selectedEvent" @click="jumpToSelectedEvent">跳到选中异常</button>
 
       <div class="speed-control">
         <button class="ctrl mini" :disabled="speedMultiplier <= minSpeed" type="button" @click="adjustSpeed(-1)">-</button>
@@ -32,11 +41,24 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import coordtransform from 'coordtransform'
 
 const props = defineProps({
+  trip: { type: Object, default: null },
+  segments: { type: Array, default: () => [] },
+  events: { type: Array, default: () => [] },
+  selectedEventId: { type: String, default: '' },
   center: { type: Array, default: () => [116.397428, 39.90923] },
   zoom: { type: Number, default: 13 },
-  segments: { type: Array, default: () => [] },
-  trip: { type: Object, default: null },
 })
+
+const emit = defineEmits(['select-event'])
+
+const TYPE_COLOR = {
+  normal: 'rgba(148, 163, 184, 0.45)',
+  detour: '#f59e0b',
+  stop: '#ef4444',
+  speed_jump: '#8b5cf6',
+  drift: '#06b6d4',
+  jump_point: '#f97316',
+}
 
 const el = ref(null)
 const panelEl = ref(null)
@@ -44,13 +66,14 @@ let map = null
 let overlays = []
 let carMarker = null
 let rafId = 0
+let selectedBadge = null
 
-const isPlaying = ref(false)
-const progress = ref(0)
-const playbackStatus = ref('等待数据')
 const minSpeed = 1
 const maxSpeed = 20
 const speedMultiplier = ref(10)
+const isPlaying = ref(false)
+const progress = ref(0)
+const playbackStatus = ref('等待数据')
 
 const playbackState = reactive({
   path: [],
@@ -73,7 +96,15 @@ const panelStyle = computed(() => {
   }
 })
 
+const selectedEvent = computed(() => props.events.find((item) => item.id === props.selectedEventId) || null)
 const hasPath = computed(() => playbackState.path.length > 1)
+const legendItems = computed(() => [
+  { type: 'detour', label: '绕路', color: TYPE_COLOR.detour },
+  { type: 'stop', label: '停留', color: TYPE_COLOR.stop },
+  { type: 'speed_jump', label: '速度突变', color: TYPE_COLOR.speed_jump },
+  { type: 'drift', label: '漂移', color: TYPE_COLOR.drift },
+  { type: 'jump_point', label: '跳点', color: TYPE_COLOR.jump_point },
+])
 
 let draggingPanel = false
 const dragOrigin = { x: 0, y: 0 }
@@ -85,8 +116,7 @@ function clamp(value, min, max) {
 
 function getScaledDuration(idx) {
   const rawSeconds = playbackState.durations[idx] || 1
-  const multiplier = Math.max(speedMultiplier.value, minSpeed)
-  return (rawSeconds * 1000) / multiplier
+  return (rawSeconds * 1000) / Math.max(speedMultiplier.value, minSpeed)
 }
 
 function adjustSpeed(delta) {
@@ -153,10 +183,14 @@ function haversineKm(lon1, lat1, lon2, lat2) {
 
 function clearOverlays() {
   if (!map) return
-  overlays.forEach((overlay) => {
-    try { map.remove(overlay) } catch { /* noop */ }
+  overlays.forEach((item) => {
+    try { map.remove(item) } catch { /* noop */ }
   })
   overlays = []
+  if (selectedBadge) {
+    try { map.remove(selectedBadge) } catch { /* noop */ }
+    selectedBadge = null
+  }
 }
 
 function clearCarMarker() {
@@ -164,13 +198,6 @@ function clearCarMarker() {
     try { map.remove(carMarker) } catch { /* noop */ }
   }
   carMarker = null
-}
-
-function cancelAnimation() {
-  if (rafId) {
-    cancelAnimationFrame(rafId)
-    rafId = 0
-  }
 }
 
 function placeCar(position) {
@@ -184,6 +211,13 @@ function placeCar(position) {
     map.add(carMarker)
   } else {
     carMarker.setPosition(position)
+  }
+}
+
+function cancelAnimation() {
+  if (rafId) {
+    cancelAnimationFrame(rafId)
+    rafId = 0
   }
 }
 
@@ -225,52 +259,96 @@ function buildPlaybackPath() {
   placeCar(playbackState.path[0])
 }
 
+function renderSelectedBadge(event) {
+  if (!map || !event) return
+  const position = toMapPoint(event.focus_point)
+  selectedBadge = new window.AMap.Marker({
+    position,
+    offset: new window.AMap.Pixel(-44, -46),
+    content: `<div class="event-badge" style="--badge-color:${event.color}">${event.title}</div>`,
+  })
+  overlays.push(selectedBadge)
+  map.add(selectedBadge)
+}
+
 function draw() {
   if (!map) return
   clearOverlays()
 
-  const segments = props.segments || []
-  if (!segments.length && !hasPath.value) return
+  const points = props.trip?.points || []
+  const anomalySegments = props.segments || []
+  if (!points.length) return
 
-  const fitTargets = []
-  for (const segment of segments) {
-    const start = toMapPoint(segment.start)
-    const end = toMapPoint(segment.end)
-    const color = segment.status === 'congested' ? '#ef4444' : '#22c55e'
+  const path = points.map((point) => toMapPoint([point.lon, point.lat]))
+  const baseLine = new window.AMap.Polyline({
+    path,
+    strokeColor: TYPE_COLOR.normal,
+    strokeWeight: 5,
+    strokeOpacity: 0.95,
+  })
+  overlays.push(baseLine)
+  map.add(baseLine)
+
+  for (const segment of anomalySegments) {
+    if (!segment || segment.type === 'normal') continue
     const line = new window.AMap.Polyline({
-      path: [start, end],
-      strokeColor: color,
-      strokeWeight: 6,
-      strokeOpacity: 0.9,
+      path: [toMapPoint(segment.start), toMapPoint(segment.end)],
+      strokeColor: segment.color || TYPE_COLOR[segment.type] || TYPE_COLOR.normal,
+      strokeWeight: segment.type === 'detour' ? 7 : 8,
+      strokeOpacity: 0.96,
+      zIndex: 12,
     })
     overlays.push(line)
-    fitTargets.push(line)
     map.add(line)
   }
 
-  const fallbackPath = playbackState.path
-  const startPos = segments.length ? toMapPoint(segments[0].start) : fallbackPath[0]
-  const endPos = segments.length ? toMapPoint(segments[segments.length - 1].end) : fallbackPath[fallbackPath.length - 1]
+  const startMarker = new window.AMap.Marker({
+    position: path[0],
+    offset: new window.AMap.Pixel(-14, -30),
+    content: '<div class="label-marker start">起点</div>',
+  })
+  const endMarker = new window.AMap.Marker({
+    position: path[path.length - 1],
+    offset: new window.AMap.Pixel(-14, -30),
+    content: '<div class="label-marker end">终点</div>',
+  })
+  overlays.push(startMarker, endMarker)
+  map.add([startMarker, endMarker])
 
-  if (startPos && endPos) {
-    const startMarker = new window.AMap.Marker({
-      position: startPos,
-      offset: new window.AMap.Pixel(-14, -30),
-      content: '<div class="label-marker start">起点</div>',
+  for (const event of props.events || []) {
+    const marker = new window.AMap.Marker({
+      position: toMapPoint(event.focus_point),
+      offset: new window.AMap.Pixel(-10, -10),
+      content: `<div class="anomaly-marker ${event.id === props.selectedEventId ? 'active' : ''}" style="--marker-color:${event.color}"></div>`,
     })
-    const endMarker = new window.AMap.Marker({
-      position: endPos,
-      offset: new window.AMap.Pixel(-14, -30),
-      content: '<div class="label-marker end">终点</div>',
-    })
-    overlays.push(startMarker, endMarker)
-    fitTargets.push(startMarker, endMarker)
-    map.add([startMarker, endMarker])
+    marker.on('click', () => emit('select-event', event.id))
+    overlays.push(marker)
+    map.add(marker)
   }
 
-  if (fitTargets.length) {
-    map.setFitView(fitTargets)
+  if (selectedEvent.value) {
+    renderSelectedBadge(selectedEvent.value)
+  } else {
+    map.setFitView(overlays)
   }
+}
+
+function focusEvent(event) {
+  if (!map || !event || !hasPath.value) return
+  const focusPos = toMapPoint(event.focus_point)
+  const index = clamp(event.start_index, 0, Math.max(0, playbackState.path.length - 2))
+  playbackState.segIdx = index
+  playbackState.segProgress = 0
+  playbackState.segmentStart = 0
+  progress.value = playbackState.path.length > 1 ? (index / (playbackState.path.length - 1)) * 100 : 0
+  placeCar(playbackState.path[index] || focusPos)
+  map.setZoomAndCenter(16, focusPos)
+  playbackStatus.value = `已定位到${event.title}`
+}
+
+function jumpToSelectedEvent() {
+  if (!selectedEvent.value) return
+  focusEvent(selectedEvent.value)
 }
 
 function resetPlayback() {
@@ -283,8 +361,8 @@ function resetPlayback() {
     placeCar(playbackState.path[0])
     playbackStatus.value = '准备回放'
   } else {
-    clearCarMarker()
     playbackStatus.value = '暂无轨迹'
+    clearCarMarker()
   }
 }
 
@@ -343,18 +421,42 @@ onMounted(() => {
 })
 
 watch(
+  () => props.trip,
+  () => {
+    buildPlaybackPath()
+    draw()
+    if (selectedEvent.value) {
+      focusEvent(selectedEvent.value)
+    }
+  },
+  { deep: true }
+)
+
+watch(
+  () => props.events,
+  () => {
+    draw()
+    if (selectedEvent.value) {
+      focusEvent(selectedEvent.value)
+    }
+  },
+  { deep: true }
+)
+
+watch(
   () => props.segments,
   () => draw(),
   { deep: true }
 )
 
 watch(
-  () => props.trip,
+  () => props.selectedEventId,
   () => {
-    buildPlaybackPath()
     draw()
-  },
-  { deep: true }
+    if (selectedEvent.value) {
+      focusEvent(selectedEvent.value)
+    }
+  }
 )
 
 onBeforeUnmount(() => {
@@ -370,7 +472,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .map-wrap {
   width: 100%;
-  height: 560px;
+  height: 620px;
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -383,6 +485,34 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
+.legend {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  z-index: 20;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.legend-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+}
+
 .playback-panel {
   position: absolute;
   right: 12px;
@@ -392,8 +522,9 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   border: 1px solid var(--border);
   backdrop-filter: blur(10px);
-  width: 240px;
+  width: 250px;
   box-shadow: var(--shadow-md);
+  z-index: 20;
 }
 
 .playback-handle {
@@ -412,6 +543,11 @@ onBeforeUnmount(() => {
 .playback-buttons {
   display: flex;
   gap: 8px;
+}
+
+.jump {
+  width: 100%;
+  margin-top: 8px;
 }
 
 .speed-control {
@@ -460,7 +596,7 @@ onBeforeUnmount(() => {
 .progress-bar {
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, rgba(47, 159, 103, 0.78), rgba(79, 124, 255, 0.72));
+  background: linear-gradient(90deg, rgba(79, 124, 255, 0.72), rgba(245, 158, 11, 0.82));
   transition: width 0.12s linear;
 }
 
@@ -485,6 +621,32 @@ onBeforeUnmount(() => {
 
 :deep(.label-marker.end) {
   background: linear-gradient(135deg, #d95b73, #f08a5d);
+}
+
+:deep(.anomaly-marker) {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--marker-color);
+  border: 3px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
+}
+
+:deep(.anomaly-marker.active) {
+  width: 22px;
+  height: 22px;
+  transform: translate(-2px, -2px);
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.38), 0 10px 22px rgba(15, 23, 42, 0.22);
+}
+
+:deep(.event-badge) {
+  padding: 6px 10px;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--badge-color);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.16);
 }
 
 :deep(.car-marker) {
