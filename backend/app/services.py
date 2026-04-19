@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections import Counter
 import math
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .diagnosis import analyze_trip_diagnosis
+from .forecast_xgboost import forecast_trip_heatmap_xgboost, train_future_heatmap_xgboost
 from .schemas import (
     AnomalyEventCount,
     AnomalyRoadDistributionItem,
@@ -17,6 +18,11 @@ from .schemas import (
     AnomalyVehicleRankingResponse,
     CarProfile,
     CarTripsItem,
+    ForecastHeatPoint,
+    ForecastHeatmapResponse,
+    ForecastHeatmapSummary,
+    ForecastTrainResponse,
+    ForecastTripHeatmapResponse,
     Segment,
     TripDetail,
     TripDiagnosisResponse,
@@ -24,6 +30,7 @@ from .schemas import (
     TripSegmentsResponse,
     TripSummary,
 )
+from .settings import settings
 
 ANOMALY_TYPE_ORDER = ["detour", "stop", "speed_jump", "drift", "jump_point"]
 SEVERITY_WEIGHT = {"low": 1, "medium": 2, "high": 3}
@@ -103,6 +110,10 @@ def _ordered_anomaly_counts(counter: Counter[str]) -> list[AnomalyEventCount]:
 
 def _midpoint(start: tuple[float, float], end: tuple[float, float]) -> tuple[float, float]:
     return ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+
+
+def _wrap_hour(hour: int) -> int:
+    return int(hour) % 24
 
 
 def _merge_diagnosis_road_occurrences(diagnosis: TripDiagnosisResponse) -> list[dict[str, Any]]:
@@ -582,3 +593,151 @@ async def search_device_ids(db: AsyncSession, q: str = "", limit: int | None = N
             params["limit"] = limit
         rows = (await db.execute(text(sql), params)).all()
     return [str(r[0]) for r in rows]
+
+
+async def fetch_future_heatmap_forecast(
+    db: AsyncSession,
+    *,
+    forecast_hour: int | None = None,
+    mode: str = "pickup",
+    grid_size: float = 0.02,
+    top_k: int = 300,
+) -> ForecastHeatmapResponse:
+    hour = _wrap_hour(datetime.now().hour + 1 if forecast_hour is None else forecast_hour)
+    safe_mode = mode if mode in {"pickup", "dropoff", "both"} else "pickup"
+    safe_grid = float(min(max(grid_size, 0.005), 0.2))
+    safe_top_k = int(min(max(top_k, 20), 1000))
+
+    q = text(
+        """
+        SELECT trip_id, start_time, end_time, lon, lat
+        FROM public.trip_data
+        WHERE array_length(lon, 1) >= 2
+          AND array_length(lat, 1) >= 2
+          AND start_time IS NOT NULL
+        ORDER BY trip_id DESC
+        LIMIT 20000
+        """
+    )
+    rows = (await db.execute(q)).mappings().all()
+
+    by_cell_hour: dict[tuple[int, int, int], int] = {}
+    cell_sum: dict[tuple[int, int], dict[str, float]] = {}
+    source_point_count = 0
+
+    def collect(lon_value: float, lat_value: float, hour_value: int) -> None:
+        nonlocal source_point_count
+        if not (math.isfinite(lon_value) and math.isfinite(lat_value)):
+            return
+        x = math.floor(lon_value / safe_grid)
+        y = math.floor(lat_value / safe_grid)
+        cell_hour_key = (x, y, _wrap_hour(hour_value))
+        by_cell_hour[cell_hour_key] = by_cell_hour.get(cell_hour_key, 0) + 1
+        cell_key = (x, y)
+        bucket = cell_sum.setdefault(cell_key, {"lon_sum": 0.0, "lat_sum": 0.0, "count": 0.0})
+        bucket["lon_sum"] += float(lon_value)
+        bucket["lat_sum"] += float(lat_value)
+        bucket["count"] += 1.0
+        source_point_count += 1
+
+    for row in rows:
+        lon_arr = list(row.get("lon") or [])
+        lat_arr = list(row.get("lat") or [])
+        if not lon_arr or not lat_arr:
+            continue
+
+        if safe_mode in {"pickup", "both"} and row.get("start_time") is not None:
+            try:
+                collect(float(lon_arr[0]), float(lat_arr[0]), int(row["start_time"].hour))
+            except Exception:
+                pass
+
+        if safe_mode in {"dropoff", "both"}:
+            end_time = row.get("end_time") or row.get("start_time")
+            if end_time is None:
+                continue
+            try:
+                collect(float(lon_arr[-1]), float(lat_arr[-1]), int(end_time.hour))
+            except Exception:
+                continue
+
+    cell_predictions: list[tuple[tuple[int, int], float]] = []
+    max_pred = 0.0
+    for (x, y), bucket in cell_sum.items():
+        pred = (
+            0.6 * by_cell_hour.get((x, y, hour), 0)
+            + 0.3 * by_cell_hour.get((x, y, _wrap_hour(hour - 1)), 0)
+            + 0.1 * by_cell_hour.get((x, y, _wrap_hour(hour - 2)), 0)
+        )
+        if pred <= 0:
+            continue
+        cell_predictions.append(((x, y), float(pred)))
+        max_pred = max(max_pred, float(pred))
+
+    cell_predictions.sort(key=lambda item: item[1], reverse=True)
+    limited_predictions = cell_predictions[:safe_top_k]
+
+    points: list[ForecastHeatPoint] = []
+    for (x, y), pred in limited_predictions:
+        bucket = cell_sum[(x, y)]
+        count = int(bucket["count"])
+        lon_center = bucket["lon_sum"] / max(bucket["count"], 1.0)
+        lat_center = bucket["lat_sum"] / max(bucket["count"], 1.0)
+        intensity = float(pred / max_pred) if max_pred > 0 else 0.0
+        points.append(
+            ForecastHeatPoint(
+                lon=round(lon_center, 6),
+                lat=round(lat_center, 6),
+                predicted_trips=round(pred, 3),
+                intensity=round(intensity, 4),
+                sample_count=count,
+            )
+        )
+
+    return ForecastHeatmapResponse(
+        summary=ForecastHeatmapSummary(
+            mode=safe_mode,
+            forecast_hour=hour,
+            time_label=f"{hour:02d}:00-{(hour + 1) % 24:02d}:00",
+            grid_size=safe_grid,
+            source_trip_count=len(rows),
+            source_point_count=source_point_count,
+            generated_cells=len(points),
+        ),
+        points=points,
+    )
+
+
+async def train_future_heatmap_model(
+    db: AsyncSession,
+    *,
+    trip_limit: int = 30000,
+    congestion_speed_kph: float | None = None,
+) -> ForecastTrainResponse:
+    threshold = (
+        float(settings.forecast_congestion_speed_kph)
+        if congestion_speed_kph is None
+        else float(congestion_speed_kph)
+    )
+    return await train_future_heatmap_xgboost(
+        db,
+        model_path=settings.forecast_model_path,
+        congestion_speed_kph=threshold,
+        trip_limit=trip_limit,
+    )
+
+
+async def fetch_future_heatmap_by_trip_xgboost(
+    db: AsyncSession,
+    *,
+    trip_id: int,
+    forecast_hour: int,
+    top_k: int = 300,
+) -> ForecastTripHeatmapResponse:
+    return await forecast_trip_heatmap_xgboost(
+        db,
+        trip_id=trip_id,
+        forecast_hour=forecast_hour,
+        model_path=settings.forecast_model_path,
+        top_k=top_k,
+    )
