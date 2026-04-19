@@ -39,3 +39,14 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+
+
+# Python virtual env
+.venv/
+**/.venv/
+backend/models/*.joblib
+
+# Node deps
+node_modules/
+**/node_modules/
