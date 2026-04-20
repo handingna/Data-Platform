@@ -13,6 +13,7 @@ from .schemas import (
     CarPortraitResponse,
     CarProfile,
     CarTripsItem,
+    DemandHotspotResponse,
     ForecastTripHeatmapResponse,
     ForecastTripSpeedResponse,
     HealthResponse,
@@ -25,6 +26,7 @@ from .services import (
     fetch_anomaly_vehicle_ranking,
     fetch_car_profile,
     fetch_car_trips,
+    fetch_demand_hotspots,
     fetch_trip_by_id,
     fetch_trip_diagnosis,
     fetch_trip_segments,
@@ -86,6 +88,25 @@ async def get_anomaly_road_distribution(
     db: AsyncSession = Depends(get_db),
 ) -> AnomalyRoadDistributionResponse:
     return await fetch_anomaly_road_distribution(db, limit=limit, trip_sample=trip_sample)
+
+
+@app.get("/api/demand/hotspots", response_model=DemandHotspotResponse)
+async def get_demand_hotspots(
+    demand_type: str = Query(default="both", regex="^(pickup|dropoff|both)$"),
+    hour_from: int = Query(default=0, ge=0, le=23),
+    hour_to: int = Query(default=23, ge=0, le=23),
+    limit: int = Query(default=20, ge=1, le=200),
+    sample_trip_count: int = Query(default=5000, ge=100, le=20000),
+    db: AsyncSession = Depends(get_db),
+) -> DemandHotspotResponse:
+    return await fetch_demand_hotspots(
+        db,
+        limit=limit,
+        sample_trip_count=sample_trip_count,
+        demand_type=demand_type,
+        hour_from=hour_from,
+        hour_to=hour_to,
+    )
 
 
 @app.get("/api/trips/{trip_id}/segments", response_model=TripSegmentsResponse)

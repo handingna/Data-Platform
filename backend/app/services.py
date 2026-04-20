@@ -18,6 +18,10 @@ from .schemas import (
     AnomalyVehicleRankingResponse,
     CarProfile,
     CarTripsItem,
+    DemandHotspotResponse,
+    DemandMigrationAnalysis,
+    DemandMigrationItem,
+    DemandTimeBucketItem,
     ForecastHeatPoint,
     ForecastHeatmapResponse,
     ForecastHeatmapSummary,
@@ -442,6 +446,314 @@ async def fetch_trip_segments(
         avg_speed_kph=trip.avg_speed_kph,
     )
     return TripSegmentsResponse(trip=summary, congestion_threshold_kph=congestion_threshold_kph, segments=segments)
+
+
+def _grid_cell(point: tuple[float, float], size: float = 0.02) -> tuple[int, int]:
+    return (math.floor(point[0] / size), math.floor(point[1] / size))
+
+
+def _grid_center(cell: tuple[int, int], size: float = 0.02) -> tuple[float, float]:
+    return (cell[0] * size + size / 2.0, cell[1] * size + size / 2.0)
+
+
+def _grid_bounds(cell: tuple[int, int], size: float = 0.02) -> list[tuple[float, float]]:
+    x0 = cell[0] * size
+    y0 = cell[1] * size
+    x1 = x0 + size
+    y1 = y0 + size
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+
+
+def _hour_matches(value: Any, hour_from: int, hour_to: int) -> bool:
+    if value is None:
+        return False
+    try:
+        hour = int(value.hour)
+    except Exception:
+        return False
+    if hour_from <= hour_to:
+        return hour_from <= hour <= hour_to
+    return hour >= hour_from or hour <= hour_to
+
+
+def _time_bins() -> list[tuple[int, int, str]]:
+    bins: list[tuple[int, int, str]] = []
+    for start in range(0, 24, 2):
+        end = start + 2
+        bins.append((start, end, f"{start:02d}-{end:02d}"))
+    return bins
+
+
+def _range_hours(hour_from: int, hour_to: int) -> list[int]:
+    if hour_from <= hour_to:
+        return list(range(hour_from, hour_to + 1))
+    return list(range(hour_from, 24)) + list(range(0, hour_to + 1))
+
+
+def _bucket_label(hour: int) -> str:
+    start = (hour // 2) * 2
+    end = start + 2
+    return f"{start:02d}-{end:02d}"
+
+
+def _compute_migration_trends(
+    early_ranks: dict[tuple[int, int], int],
+    late_ranks: dict[tuple[int, int], int],
+    early_counts: dict[tuple[int, int], int],
+    late_counts: dict[tuple[int, int], int],
+    cell_centers: dict[tuple[int, int], tuple[float, float]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    zone_ids: list[tuple[int, int]] = []
+    for cell, rank in sorted(early_ranks.items(), key=lambda item: item[1]):
+        if cell not in zone_ids:
+            zone_ids.append(cell)
+    for cell, rank in sorted(late_ranks.items(), key=lambda item: item[1]):
+        if cell not in zone_ids:
+            zone_ids.append(cell)
+
+    items: list[dict[str, Any]] = []
+    for cell in zone_ids[: max(limit, 20)]:
+        early_rank = early_ranks.get(cell)
+        late_rank = late_ranks.get(cell)
+        early_count = early_counts.get(cell, 0)
+        late_count = late_counts.get(cell, 0)
+        if early_count == 0 and late_count == 0:
+            continue
+
+        if early_rank is None:
+            trend = "new"
+        elif late_rank is None:
+            trend = "fade"
+        elif late_rank < early_rank:
+            trend = "up"
+        elif late_rank > early_rank:
+            trend = "down"
+        else:
+            trend = "stable"
+
+        rank_change = None
+        if early_rank is not None and late_rank is not None:
+            rank_change = early_rank - late_rank  # 正值表示上升（late_rank 更小）
+
+        demand_type = "mixed"
+        pickup = 0
+        dropoff = 0
+        if cell in early_counts or cell in late_counts:
+            pickup = 0
+            dropoff = 0
+        items.append(
+            {
+                "zone_id": f"{cell[0]}_{cell[1]}",
+                "demand_type": "mixed",
+                "early_rank": early_rank,
+                "late_rank": late_rank,
+                "early_count": early_count,
+                "late_count": late_count,
+                "trend": trend,
+                "rank_change": rank_change,
+                "center": cell_centers.get(cell, _grid_center(cell)),
+            }
+        )
+
+    items.sort(key=lambda item: (item["late_rank"] or float('inf'), item["trend"], item["zone_id"]))
+    return items[:limit]
+
+
+async def fetch_demand_hotspots(
+    db: AsyncSession,
+    limit: int = 20,
+    sample_trip_count: int = 5000,
+    demand_type: str = "both",
+    hour_from: int = 0,
+    hour_to: int = 23,
+) -> DemandHotspotResponse:
+    q = text(
+        """
+        SELECT trip_id, log_date, start_time, end_time,
+               CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
+               CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
+               CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
+               CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
+        FROM public.trip_data
+        WHERE array_length(lon, 1) >= 1
+        ORDER BY log_date DESC
+        LIMIT :sample_trip_count
+        """
+    )
+    rows = (await db.execute(q, {"sample_trip_count": sample_trip_count})).mappings().all()
+
+    selected_hours = _range_hours(hour_from, hour_to)
+    early_hours: list[int] = []
+    late_hours: list[int] = []
+    if len(selected_hours) > 1:
+        split = max(1, len(selected_hours) // 2)
+        early_hours = selected_hours[:split]
+        late_hours = selected_hours[split:]
+    else:
+        early_hours = selected_hours
+
+    bucket_counts: dict[str, dict[str, int]] = {
+        label: {"pickup_count": 0, "dropoff_count": 0, "total_count": 0}
+        for _, _, label in _time_bins()
+    }
+
+    grid_aggregates: dict[tuple[int, int], dict[str, Any]] = {}
+    early_zone_counts: dict[tuple[int, int], int] = {}
+    late_zone_counts: dict[tuple[int, int], int] = {}
+    cell_centers: dict[tuple[int, int], tuple[float, float]] = {}
+
+    for row in rows:
+        start_lon = row.get("start_lon")
+        start_lat = row.get("start_lat")
+        end_lon = row.get("end_lon")
+        end_lat = row.get("end_lat")
+        start_time = row.get("start_time")
+        end_time = row.get("end_time")
+
+        can_pickup = demand_type in ("pickup", "both") and start_lon is not None and start_lat is not None and _hour_matches(start_time, hour_from, hour_to)
+        can_dropoff = demand_type in ("dropoff", "both") and end_lon is not None and end_lat is not None and _hour_matches(end_time, hour_from, hour_to)
+        if not can_pickup and not can_dropoff:
+            continue
+
+        if can_pickup:
+            cell = _grid_cell((float(start_lon), float(start_lat)))
+            cell_centers.setdefault(cell, _grid_center(cell))
+            bucket = grid_aggregates.setdefault(
+                cell,
+                {
+                    "pickup_count": 0,
+                    "dropoff_count": 0,
+                    "hour_sum": 0.0,
+                    "hour_count": 0,
+                },
+            )
+            bucket["pickup_count"] += 1
+            if start_time is not None:
+                bucket["hour_sum"] += float(start_time.hour)
+                bucket["hour_count"] += 1
+            label = _bucket_label(int(start_time.hour)) if start_time is not None else None
+            if label is not None:
+                bucket_counts[label]["pickup_count"] += 1
+                bucket_counts[label]["total_count"] += 1
+
+            if start_time is not None:
+                hour = int(start_time.hour)
+                if hour in early_hours:
+                    early_zone_counts[cell] = early_zone_counts.get(cell, 0) + 1
+                elif hour in late_hours:
+                    late_zone_counts[cell] = late_zone_counts.get(cell, 0) + 1
+
+        if can_dropoff:
+            cell = _grid_cell((float(end_lon), float(end_lat)))
+            cell_centers.setdefault(cell, _grid_center(cell))
+            bucket = grid_aggregates.setdefault(
+                cell,
+                {
+                    "pickup_count": 0,
+                    "dropoff_count": 0,
+                    "hour_sum": 0.0,
+                    "hour_count": 0,
+                },
+            )
+            bucket["dropoff_count"] += 1
+            if end_time is not None:
+                bucket["hour_sum"] += float(end_time.hour)
+                bucket["hour_count"] += 1
+            label = _bucket_label(int(end_time.hour)) if end_time is not None else None
+            if label is not None:
+                bucket_counts[label]["dropoff_count"] += 1
+                bucket_counts[label]["total_count"] += 1
+
+            if end_time is not None:
+                hour = int(end_time.hour)
+                if hour in early_hours:
+                    early_zone_counts[cell] = early_zone_counts.get(cell, 0) + 1
+                elif hour in late_hours:
+                    late_zone_counts[cell] = late_zone_counts.get(cell, 0) + 1
+
+    items: list[dict[str, Any]] = []
+    for cell, bucket in grid_aggregates.items():
+        pickup_count = int(bucket["pickup_count"])
+        dropoff_count = int(bucket["dropoff_count"])
+        total_count = pickup_count + dropoff_count
+        if total_count <= 0:
+            continue
+        type_label = "mixed"
+        if pickup_count > 0 and dropoff_count == 0:
+            type_label = "pickup"
+        elif dropoff_count > 0 and pickup_count == 0:
+            type_label = "dropoff"
+
+        avg_hour = None
+        if bucket["hour_count"] > 0:
+            avg_hour = round(bucket["hour_sum"] / bucket["hour_count"], 2)
+
+        items.append(
+            {
+                "zone_id": f"{cell[0]}_{cell[1]}",
+                "demand_type": type_label,
+                "trip_count": total_count,
+                "pickup_count": pickup_count,
+                "dropoff_count": dropoff_count,
+                "avg_hour": avg_hour,
+                "center": cell_centers[cell],
+                "bounds": _grid_bounds(cell),
+            }
+        )
+
+    items.sort(key=lambda item: (-item["trip_count"], -item["pickup_count"], -item["dropoff_count"], item["zone_id"]))
+    selected_items = items[:limit]
+
+    time_buckets = [
+        {
+            "label": label,
+            "pickup_count": bucket_counts[label]["pickup_count"],
+            "dropoff_count": bucket_counts[label]["dropoff_count"],
+            "total_count": bucket_counts[label]["total_count"],
+        }
+        for _, _, label in _time_bins()
+    ]
+
+    early_sorted = sorted(early_zone_counts.items(), key=lambda item: (-item[1], item[0]))
+    late_sorted = sorted(late_zone_counts.items(), key=lambda item: (-item[1], item[0]))
+    early_ranks = {cell: idx + 1 for idx, (cell, _) in enumerate(early_sorted)}
+    late_ranks = {cell: idx + 1 for idx, (cell, _) in enumerate(late_sorted)}
+
+    migration_items = _compute_migration_trends(
+        early_ranks=early_ranks,
+        late_ranks=late_ranks,
+        early_counts=early_zone_counts,
+        late_counts=late_zone_counts,
+        cell_centers=cell_centers,
+        limit=limit,
+    )
+
+    migration_analysis = {
+        "start_period": f"{hour_from:02d}:00",
+        "end_period": f"{hour_to:02d}:00",
+        "items": migration_items,
+    }
+
+    return DemandHotspotResponse(
+        sample_trip_count=len(rows),
+        hotspot_count=len(selected_items),
+        items=[
+            {
+                "zone_id": item["zone_id"],
+                "demand_type": item["demand_type"],
+                "trip_count": item["trip_count"],
+                "pickup_count": item["pickup_count"],
+                "dropoff_count": item["dropoff_count"],
+                "avg_hour": item["avg_hour"],
+                "center": item["center"],
+                "bounds": item["bounds"],
+            }
+            for item in selected_items
+        ],
+        time_buckets=time_buckets,
+        migration_analysis=migration_analysis,
+    )
 
 
 async def fetch_car_profile(db: AsyncSession, device_id: str) -> CarProfile | None:

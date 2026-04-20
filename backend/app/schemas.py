@@ -238,6 +238,48 @@ class AnomalyRoadDistributionResponse(BaseModel):
     items: list[AnomalyRoadDistributionItem] = Field(default_factory=list)
 
 
+class DemandHotspotItem(BaseModel):
+    zone_id: str
+    demand_type: Literal["pickup", "dropoff", "mixed"]
+    trip_count: int
+    pickup_count: int
+    dropoff_count: int
+    avg_hour: float | None = None
+    center: tuple[float, float]
+    bounds: list[tuple[float, float]]
+
+
+class DemandTimeBucketItem(BaseModel):
+    label: str
+    pickup_count: int
+    dropoff_count: int
+    total_count: int
+
+
+class DemandMigrationItem(BaseModel):
+    zone_id: str
+    demand_type: Literal["pickup", "dropoff", "mixed"]
+    early_rank: int | None = None
+    late_rank: int | None = None
+    early_count: int
+    late_count: int
+    trend: Literal["up", "down", "stable", "new", "fade"]
+    rank_change: int | None = None
+    center: tuple[float, float]
+
+
+class DemandMigrationAnalysis(BaseModel):
+    start_period: str
+    end_period: str
+    items: list[DemandMigrationItem] = Field(default_factory=list)
+
+
+class DemandHotspotResponse(BaseModel):
+    sample_trip_count: int
+    hotspot_count: int
+    items: list[DemandHotspotItem] = Field(default_factory=list)
+    time_buckets: list[DemandTimeBucketItem] = Field(default_factory=list)
+    migration_analysis: DemandMigrationAnalysis | None = None
 class ForecastHeatPoint(BaseModel):
     lon: float
     lat: float

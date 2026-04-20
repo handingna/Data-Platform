@@ -13,6 +13,7 @@
         <RouterLink class="nav-item" to="/trip">行程分析</RouterLink>
         <RouterLink class="nav-item" to="/car">出租车运营画像</RouterLink>
         <RouterLink class="nav-item" to="/anomaly">异常诊断</RouterLink>
+        <RouterLink class="nav-item" to="/demand">需求洞察</RouterLink>
         <RouterLink class="nav-item" to="/forecast-heatmap">交通预测</RouterLink>
       </nav>
     </aside>
