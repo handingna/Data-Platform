@@ -237,3 +237,97 @@ class AnomalyRoadDistributionResponse(BaseModel):
     road_count: int
     items: list[AnomalyRoadDistributionItem] = Field(default_factory=list)
 
+
+class ForecastHeatPoint(BaseModel):
+    lon: float
+    lat: float
+    predicted_trips: float
+    intensity: float
+    sample_count: int
+
+
+class ForecastHeatmapSummary(BaseModel):
+    mode: Literal["pickup", "dropoff", "both"]
+    forecast_hour: int
+    time_label: str
+    grid_size: float
+    source_trip_count: int
+    source_point_count: int
+    generated_cells: int
+
+
+class ForecastHeatmapResponse(BaseModel):
+    summary: ForecastHeatmapSummary
+    points: list[ForecastHeatPoint] = Field(default_factory=list)
+
+
+class ForecastTrainSummary(BaseModel):
+    model_type: Literal["xgboost"]
+    model_path: str
+    trained_trip_count: int
+    trained_segment_count: int
+    training_row_count: int
+    rmse: float
+    mae: float
+    trained_at: datetime
+
+
+class ForecastTrainResponse(BaseModel):
+    ok: bool
+    summary: ForecastTrainSummary
+
+
+class ForecastTripHeatmapSummary(BaseModel):
+    model_type: Literal["xgboost"]
+    trip_id: int
+    forecast_after_minutes: int = 0
+    forecast_hour: int
+    time_label: str
+    base_time: datetime | None = None
+    target_time: datetime | None = None
+    point_count: int
+
+
+class ForecastTripHeatmapResponse(BaseModel):
+    summary: ForecastTripHeatmapSummary
+    points: list[ForecastHeatPoint] = Field(default_factory=list)
+
+
+class ForecastSpeedPoint(BaseModel):
+    offset_minutes: int
+    target_time: datetime | None = None
+    predicted_speed_kph: float
+    predicted_intensity: float
+    risk_level: RiskLevel
+
+
+class ForecastSpeedWindow(BaseModel):
+    start_offset_minutes: int
+    end_offset_minutes: int
+    duration_minutes: int
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    max_predicted_intensity: float
+    risk_level: RiskLevel
+
+
+class ForecastSpeedSummary(BaseModel):
+    model_type: Literal["xgboost"]
+    trip_id: int
+    horizon_minutes: int
+    step_minutes: int
+    congestion_speed_kph: float
+    avg_predicted_speed_kph: float
+    min_predicted_speed_kph: float
+    max_predicted_intensity: float
+    congestion_start_offset_minutes: int | None = None
+    congestion_start_time: datetime | None = None
+    congestion_duration_minutes: int
+    overall_risk_level: RiskLevel
+
+
+class ForecastTripSpeedResponse(BaseModel):
+    summary: ForecastSpeedSummary
+    points: list[ForecastSpeedPoint] = Field(default_factory=list)
+    windows: list[ForecastSpeedWindow] = Field(default_factory=list)
+

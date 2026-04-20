@@ -69,6 +69,11 @@ npm run dev
 
 tips：requirements.txt可能不全，如果运行碰壁先自行解决一下，基本都是module问题，我使用的是python3.10
 
+# 6) 预测功能的离线训练
+
+
+python backend/scripts/forecast_xgb_train.py --trip-limit 2000 --congestion-speed-kph 20 
+
 # 待实现功能及分工
 目前（2026.4.3）数据库我现在只传了一个数据集（jld2）进去（主要用于测试，后期再补），现在只有两张表
 ```

@@ -13,6 +13,8 @@ from .schemas import (
     CarPortraitResponse,
     CarProfile,
     CarTripsItem,
+    ForecastTripHeatmapResponse,
+    ForecastTripSpeedResponse,
     HealthResponse,
     TripDetail,
     TripDiagnosisResponse,
@@ -121,6 +123,56 @@ async def get_car_trips(
     db: AsyncSession = Depends(get_db),
 ) -> list[CarTripsItem]:
     return await fetch_car_trips(db, device_id, limit=limit)
+
+
+@app.get("/api/forecast/heatmap/by-trip", response_model=ForecastTripHeatmapResponse)
+async def get_forecast_heatmap_by_trip(
+    trip_id: int = Query(..., ge=1),
+    forecast_after_minutes: int = Query(default=60, ge=0, le=24 * 60),
+    top_k: int = Query(default=20000, ge=1, le=20000),
+    db: AsyncSession = Depends(get_db),
+) -> ForecastTripHeatmapResponse:
+    try:
+        from .forecast_xgboost import forecast_trip_heatmap_xgboost
+
+        return await forecast_trip_heatmap_xgboost(
+            db,
+            trip_id=trip_id,
+            forecast_after_minutes=forecast_after_minutes,
+            model_path=settings.forecast_model_path,
+            top_k=top_k,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"{e}. Please train model first.") from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.get("/api/forecast/speed/by-trip", response_model=ForecastTripSpeedResponse)
+async def get_forecast_speed_by_trip(
+    trip_id: int = Query(..., ge=1),
+    horizon_minutes: int = Query(default=180, ge=30, le=24 * 60),
+    step_minutes: int = Query(default=30, ge=5, le=240),
+    top_k: int = Query(default=20000, ge=1, le=20000),
+    congestion_speed_kph: float = Query(default=20.0, ge=1.0, le=200.0),
+    db: AsyncSession = Depends(get_db),
+) -> ForecastTripSpeedResponse:
+    try:
+        from .forecast_xgboost import forecast_trip_speed_curve_xgboost
+
+        return await forecast_trip_speed_curve_xgboost(
+            db,
+            trip_id=trip_id,
+            horizon_minutes=horizon_minutes,
+            step_minutes=step_minutes,
+            model_path=settings.forecast_model_path,
+            top_k=top_k,
+            congestion_speed_kph=congestion_speed_kph,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"{e}. Please train model first.") from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @app.get("/api/meta/trip-ids", response_model=list[int])

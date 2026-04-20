@@ -3,3 +3,6 @@ uvicorn[standard]
 SQLAlchemy[asyncio]
 asyncpg
 python-dotenv
+scikit-learn
+xgboost
+joblib
