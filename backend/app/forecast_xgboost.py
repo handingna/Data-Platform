@@ -188,59 +188,94 @@ async def train_future_heatmap_xgboost(
     congestion_speed_kph: float = 20.0,
     trip_limit: int = 30000,
 ) -> ForecastTrainResponse:
-    q = text(
-        """
-        SELECT trip_id, start_time, roads, speed_array, tms
-        FROM public.trip_data
-        WHERE array_length(roads, 1) >= 2
-          AND array_length(speed_array, 1) >= 1
-        ORDER BY trip_id DESC
-        LIMIT :trip_limit
-        """
-    )
-    rows = (await db.execute(q, {"trip_limit": int(max(1000, trip_limit))})).mappings().all()
+    # q = text(
+    #     """
+    #     SELECT trip_id, start_time, roads, speed_array, tms
+    #     FROM public.trip_data
+    #     WHERE array_length(roads, 1) >= 2
+    #       AND array_length(speed_array, 1) >= 1
+    #     ORDER BY trip_id DESC
+    #     LIMIT :trip_limit
+    #     """
+    # )
+    # rows = (await db.execute(q, {"trip_limit": int(max(1000, trip_limit))})).mappings().all()
+    #
+    # road_hour_sum_count: dict[int, dict[int, list[float]]] = {}
+    # hour_sum_count: dict[int, list[float]] = {}
+    # trained_segment_count = 0
+    #
+    # for row in rows:
+    #     roads = list(row.get("roads") or [])
+    #     speeds = list(row.get("speed_array") or [])
+    #     tms = list(row.get("tms") or [])
+    #     if not roads or not speeds:
+    #         continue
+    #
+    #     fallback_hour = int(getattr(row.get("start_time"), "hour", 0) or 0)
+    #     usable = min(len(speeds), max(0, len(roads) - 1))
+    #
+    #     for idx in range(usable):
+    #         road_raw = roads[idx]
+    #         speed_raw = speeds[idx]
+    #         if road_raw is None or speed_raw is None:
+    #             continue
+    #         try:
+    #             road_id = int(road_raw)
+    #             speed = float(speed_raw)
+    #         except Exception:
+    #             continue
+    #         if not math.isfinite(speed):
+    #             continue
+    #
+    #         ts = tms[idx] if idx < len(tms) else None
+    #         hour = _safe_hour_from_ts(ts, fallback_hour)
+    #         intensity = _clamp01((float(congestion_speed_kph) - speed) / max(float(congestion_speed_kph), 1.0))
+    #
+    #         road_bucket = road_hour_sum_count.setdefault(road_id, {})
+    #         pair = road_bucket.setdefault(hour, [0.0, 0.0])
+    #         pair[0] += intensity
+    #         pair[1] += 1.0
+    #
+    #         hour_pair = hour_sum_count.setdefault(hour, [0.0, 0.0])
+    #         hour_pair[0] += intensity
+    #         hour_pair[1] += 1.0
+    #         trained_segment_count += 1
+    """
+    【修改说明】
+    从 DW 层 dw_fact_road_segment 获取路段速度和道路信息，
+    congestion_intensity 已预计算，可直接用于训练。
+    """
+    q = text("""
+        SELECT s.trip_id, s.road_id, s.speed_kph, s.start_hour,
+               s.congestion_intensity
+        FROM dw_fact_road_segment s
+        WHERE s.speed_kph IS NOT NULL
+          AND s.road_id IS NOT NULL
+        ORDER BY s.trip_id DESC
+        LIMIT :segment_limit
+    """)
+    # 估算路段数 = 行程数 * 平均路段数（约50）
+    segment_limit = trip_limit * 50
+    rows = (await db.execute(q, {"segment_limit": segment_limit})).mappings().all()
 
     road_hour_sum_count: dict[int, dict[int, list[float]]] = {}
     hour_sum_count: dict[int, list[float]] = {}
     trained_segment_count = 0
 
     for row in rows:
-        roads = list(row.get("roads") or [])
-        speeds = list(row.get("speed_array") or [])
-        tms = list(row.get("tms") or [])
-        if not roads or not speeds:
-            continue
+        road_id = int(row["road_id"])
+        hour = int(row["start_hour"])
+        intensity = float(row["congestion_intensity"]) if row.get("congestion_intensity") is not None else 0.0
 
-        fallback_hour = int(getattr(row.get("start_time"), "hour", 0) or 0)
-        usable = min(len(speeds), max(0, len(roads) - 1))
+        road_bucket = road_hour_sum_count.setdefault(road_id, {})
+        pair = road_bucket.setdefault(hour, [0.0, 0.0])
+        pair[0] += intensity
+        pair[1] += 1.0
 
-        for idx in range(usable):
-            road_raw = roads[idx]
-            speed_raw = speeds[idx]
-            if road_raw is None or speed_raw is None:
-                continue
-            try:
-                road_id = int(road_raw)
-                speed = float(speed_raw)
-            except Exception:
-                continue
-            if not math.isfinite(speed):
-                continue
-
-            ts = tms[idx] if idx < len(tms) else None
-            hour = _safe_hour_from_ts(ts, fallback_hour)
-            intensity = _clamp01((float(congestion_speed_kph) - speed) / max(float(congestion_speed_kph), 1.0))
-
-            road_bucket = road_hour_sum_count.setdefault(road_id, {})
-            pair = road_bucket.setdefault(hour, [0.0, 0.0])
-            pair[0] += intensity
-            pair[1] += 1.0
-
-            hour_pair = hour_sum_count.setdefault(hour, [0.0, 0.0])
-            hour_pair[0] += intensity
-            hour_pair[1] += 1.0
-            trained_segment_count += 1
-
+        hour_pair = hour_sum_count.setdefault(hour, [0.0, 0.0])
+        hour_pair[0] += intensity
+        hour_pair[1] += 1.0
+        trained_segment_count += 1
     if trained_segment_count == 0:
         raise ValueError("No valid segment samples found for training.")
 
@@ -335,6 +370,132 @@ async def train_future_heatmap_xgboost(
     )
 
 
+# async def forecast_trip_heatmap_xgboost(
+#     db: AsyncSession,
+#     *,
+#     trip_id: int,
+#     forecast_after_minutes: int,
+#     model_path: str,
+#     top_k: int = 300,
+# ) -> ForecastTripHeatmapResponse:
+#     model_file = Path(model_path)
+#     if not model_file.exists():
+#         raise FileNotFoundError(f"Model file not found: {model_file}")
+#
+#     artifact = joblib.load(model_file)
+#     model, road_hour_mean, road_total_count, hour_global_mean, global_mean = _artifact_to_runtime(artifact)
+#
+#     q = text(
+#         """
+#         SELECT trip_id, lon, lat, roads, start_time, end_time
+#         FROM public.trip_data
+#         WHERE trip_id = :trip_id
+#         ORDER BY log_date DESC
+#         LIMIT 1
+#         """
+#     )
+#     row = (await db.execute(q, {"trip_id": int(trip_id)})).mappings().first()
+#     if not row:
+#         raise ValueError("trip not found")
+#
+#     safe_after_minutes = int(forecast_after_minutes)
+#     if safe_after_minutes < 0:
+#         safe_after_minutes = 0
+#
+#     lon_arr = list(row.get("lon") or [])
+#     lat_arr = list(row.get("lat") or [])
+#     roads = list(row.get("roads") or [])
+#     base_time = row.get("end_time") or row.get("start_time")
+#     target_time = (base_time + timedelta(minutes=safe_after_minutes)) if base_time is not None else None
+#     safe_hour = int(getattr(target_time, "hour", 0) or 0) % 24
+#     target_label = target_time.strftime("%Y-%m-%d %H:%M") if target_time is not None else f"{safe_hour:02d}:00"
+#     time_label = f"行程后{safe_after_minutes}分钟（目标 {target_label}）"
+#
+#     n_points = min(len(lon_arr), len(lat_arr))
+#     if n_points < 1:
+#         return ForecastTripHeatmapResponse(
+#             summary=ForecastTripHeatmapSummary(
+#                 model_type="xgboost",
+#                 trip_id=int(trip_id),
+#                 forecast_after_minutes=safe_after_minutes,
+#                 forecast_hour=safe_hour,
+#                 time_label=time_label,
+#                 base_time=base_time,
+#                 target_time=target_time,
+#                 point_count=0,
+#             ),
+#             points=[],
+#         )
+#
+#     points: list[ForecastHeatPoint] = []
+#     last_valid_road_id: int | None = None
+#
+#     for idx in range(n_points):
+#         try:
+#             lon = float(lon_arr[idx])
+#             lat = float(lat_arr[idx])
+#         except Exception:
+#             continue
+#
+#         road_raw = roads[idx] if idx < len(roads) else None
+#         road_id: int | None = None
+#         if road_raw is not None:
+#             try:
+#                 road_id = int(road_raw)
+#                 last_valid_road_id = road_id
+#             except Exception:
+#                 road_id = None
+#         if road_id is None:
+#             road_id = last_valid_road_id
+#         if road_id is None:
+#             continue
+#
+#         feature = _build_feature_vector(
+#             road_id=road_id,
+#             target_hour=safe_hour,
+#             road_hour_mean=road_hour_mean,
+#             road_total_count=road_total_count,
+#             hour_global_mean=hour_global_mean,
+#             global_mean=global_mean,
+#         )
+#         pred = float(model.predict(np.asarray([feature], dtype=np.float32))[0])
+#         intensity = _temporal_adjust_intensity(
+#             pred,
+#             hour=safe_hour,
+#             hour_global_mean=hour_global_mean,
+#             global_mean=global_mean,
+#         )
+#         sample_count = int(road_total_count.get(road_id, 0))
+#         predicted_trips = max(0.01, intensity * max(sample_count / 24.0, 1.0))
+#         if 0 <= safe_hour <= 5:
+#             predicted_trips = min(predicted_trips, 1)
+#
+#         points.append(
+#             ForecastHeatPoint(
+#                 lon=round(lon, 6),
+#                 lat=round(lat, 6),
+#                 predicted_trips=round(predicted_trips, 4),
+#                 intensity=round(intensity, 4),
+#                 sample_count=sample_count,
+#             )
+#         )
+#
+#     safe_top_k = int(max(1, min(top_k, 20000)))
+#     limited = points if len(points) <= safe_top_k else points[:safe_top_k]
+#
+#     return ForecastTripHeatmapResponse(
+#         summary=ForecastTripHeatmapSummary(
+#             model_type="xgboost",
+#             trip_id=int(trip_id),
+#             forecast_after_minutes=safe_after_minutes,
+#             forecast_hour=safe_hour,
+#             time_label=time_label,
+#             base_time=base_time,
+#             target_time=target_time,
+#             point_count=len(limited),
+#         ),
+#         points=limited,
+#     )
 async def forecast_trip_heatmap_xgboost(
     db: AsyncSession,
     *,
@@ -350,33 +511,39 @@ async def forecast_trip_heatmap_xgboost(
     artifact = joblib.load(model_file)
     model, road_hour_mean, road_total_count, hour_global_mean, global_mean = _artifact_to_runtime(artifact)
 
-    q = text(
-        """
-        SELECT trip_id, lon, lat, roads, start_time, end_time
-        FROM public.trip_data
+    # 【修改】从 DW 层获取行程基本信息
+    q_trip = text("""
+        SELECT trip_id, start_time, end_time
+        FROM dw_fact_trip
         WHERE trip_id = :trip_id
-        ORDER BY log_date DESC
         LIMIT 1
-        """
-    )
-    row = (await db.execute(q, {"trip_id": int(trip_id)})).mappings().first()
-    if not row:
+    """)
+    trip_row = (await db.execute(q_trip, {"trip_id": int(trip_id)})).mappings().first()
+    if not trip_row:
         raise ValueError("trip not found")
 
     safe_after_minutes = int(forecast_after_minutes)
     if safe_after_minutes < 0:
         safe_after_minutes = 0
 
-    lon_arr = list(row.get("lon") or [])
-    lat_arr = list(row.get("lat") or [])
-    roads = list(row.get("roads") or [])
-    base_time = row.get("end_time") or row.get("start_time")
+    # 【修改】从 DW 层路段表获取坐标和 road_id（已展开，无需处理数组）
+    q_segments = text("""
+        SELECT segment_index, start_lon, start_lat, road_id
+        FROM dw_fact_road_segment
+        WHERE trip_id = :trip_id
+          AND start_lon IS NOT NULL
+          AND start_lat IS NOT NULL
+        ORDER BY segment_index
+    """)
+    seg_rows = (await db.execute(q_segments, {"trip_id": int(trip_id)})).mappings().all()
+
+    base_time = trip_row.get("end_time") or trip_row.get("start_time")
     target_time = (base_time + timedelta(minutes=safe_after_minutes)) if base_time is not None else None
     safe_hour = int(getattr(target_time, "hour", 0) or 0) % 24
     target_label = target_time.strftime("%Y-%m-%d %H:%M") if target_time is not None else f"{safe_hour:02d}:00"
     time_label = f"行程后{safe_after_minutes}分钟（目标 {target_label}）"
 
-    n_points = min(len(lon_arr), len(lat_arr))
+    n_points = len(seg_rows)
     if n_points < 1:
         return ForecastTripHeatmapResponse(
             summary=ForecastTripHeatmapSummary(
@@ -395,14 +562,14 @@ async def forecast_trip_heatmap_xgboost(
     points: list[ForecastHeatPoint] = []
     last_valid_road_id: int | None = None
 
-    for idx in range(n_points):
+    for row in seg_rows:
         try:
-            lon = float(lon_arr[idx])
-            lat = float(lat_arr[idx])
+            lon = float(row["start_lon"])
+            lat = float(row["start_lat"])
         except Exception:
             continue
 
-        road_raw = roads[idx] if idx < len(roads) else None
+        road_raw = row.get("road_id")
         road_id: int | None = None
         if road_raw is not None:
             try:
@@ -462,7 +629,6 @@ async def forecast_trip_heatmap_xgboost(
         points=limited,
     )
 
-
 async def forecast_trip_speed_curve_xgboost(
     db: AsyncSession,
     *,
@@ -482,26 +648,121 @@ async def forecast_trip_speed_curve_xgboost(
 
     threshold_kph = float(artifact.get("congestion_speed_kph") or congestion_speed_kph)
 
-    q = text(
-        """
-        SELECT trip_id, roads, start_time, end_time
-        FROM public.trip_data
+    # q = text(
+    #     """
+    #     SELECT trip_id, roads, start_time, end_time
+    #     FROM public.trip_data
+    #     WHERE trip_id = :trip_id
+    #     ORDER BY log_date DESC
+    #     LIMIT 1
+    #     """
+    # )
+    # row = (await db.execute(q, {"trip_id": int(trip_id)})).mappings().first()
+    # if not row:
+    #     raise ValueError("trip not found")
+    #
+    # roads_raw = list(row.get("roads") or [])
+    # road_ids: list[int] = []
+    # for item in roads_raw:
+    #     if item is None:
+    #         continue
+    #     try:
+    #         road_ids.append(int(item))
+    #     except Exception:
+    #         continue
+    #
+    # if not road_ids:
+    #     raise ValueError("trip has no usable road ids")
+    #
+    # safe_top_k = int(max(1, min(top_k, 20000)))
+    # if len(road_ids) > safe_top_k:
+    #     road_ids = road_ids[:safe_top_k]
+    #
+    # safe_horizon = int(max(30, min(horizon_minutes, 24 * 60)))
+    # safe_step = int(max(5, min(step_minutes, safe_horizon)))
+    # offset_list = list(range(safe_step, safe_horizon + 1, safe_step))
+    # if not offset_list:
+    #     offset_list = [safe_step]
+    #
+    # base_time = row.get("end_time") or row.get("start_time")
+    #
+    # points: list[ForecastSpeedPoint] = []
+    # congested_offsets: list[int] = []
+    # avg_speed_acc = 0.0
+    # min_speed = float("inf")
+    # max_intensity = 0.0
+    #
+    # for offset_minutes in offset_list:
+    #     target_time = (base_time + timedelta(minutes=offset_minutes)) if base_time is not None else None
+    #     target_hour = int(getattr(target_time, "hour", 0) or 0) % 24
+    #
+    #     intensity_sum = 0.0
+    #     intensity_count = 0
+    #     for road_id in road_ids:
+    #         feature = _build_feature_vector(
+    #             road_id=road_id,
+    #             target_hour=target_hour,
+    #             road_hour_mean=road_hour_mean,
+    #             road_total_count=road_total_count,
+    #             hour_global_mean=hour_global_mean,
+    #             global_mean=global_mean,
+    #         )
+    #         pred = float(model.predict(np.asarray([feature], dtype=np.float32))[0])
+    #         intensity = _temporal_adjust_intensity(
+    #             pred,
+    #             hour=target_hour,
+    #             hour_global_mean=hour_global_mean,
+    #             global_mean=global_mean,
+    #         )
+    #         intensity_sum += intensity
+    #         intensity_count += 1
+    #
+    #     mean_intensity = (intensity_sum / intensity_count) if intensity_count > 0 else 0.0
+    #     predicted_speed = _speed_from_intensity(mean_intensity)
+    #     risk = _risk_level_from_intensity(mean_intensity)
+    #
+    #     if predicted_speed < threshold_kph:
+    #         congested_offsets.append(offset_minutes)
+    #
+    #     avg_speed_acc += predicted_speed
+    #     min_speed = min(min_speed, predicted_speed)
+    #     max_intensity = max(max_intensity, mean_intensity)
+    #
+    #     points.append(
+    #         ForecastSpeedPoint(
+    #             offset_minutes=offset_minutes,
+    #             target_time=target_time,
+    #             predicted_speed_kph=round(predicted_speed, 3),
+    #             predicted_intensity=round(mean_intensity, 4),
+    #             risk_level=risk,  # type: ignore[arg-type]
+    #         )
+    #     )
+    # 【修改】从 DW 层 dw_fact_trip + dw_fact_road_segment 获取数据
+    # 不再从 trip_data 展开数组
+    q_trip = text("""
+        SELECT trip_id, start_time, end_time
+        FROM dw_fact_trip
         WHERE trip_id = :trip_id
-        ORDER BY log_date DESC
         LIMIT 1
-        """
-    )
-    row = (await db.execute(q, {"trip_id": int(trip_id)})).mappings().first()
-    if not row:
+    """)
+    trip_row = (await db.execute(q_trip, {"trip_id": int(trip_id)})).mappings().first()
+    if not trip_row:
         raise ValueError("trip not found")
 
-    roads_raw = list(row.get("roads") or [])
+    # 【修改】从 DW 层路段表获取 road_id 列表（已展开）
+    q_segments = text("""
+        SELECT road_id
+        FROM dw_fact_road_segment
+        WHERE trip_id = :trip_id
+          AND road_id IS NOT NULL
+        ORDER BY segment_index
+    """)
+    seg_rows = (await db.execute(q_segments, {"trip_id": int(trip_id)})).mappings().all()
+
     road_ids: list[int] = []
-    for item in roads_raw:
-        if item is None:
-            continue
+    for row in seg_rows:
         try:
-            road_ids.append(int(item))
+            road_ids.append(int(row["road_id"]))
         except Exception:
             continue
 
@@ -518,7 +779,7 @@ async def forecast_trip_speed_curve_xgboost(
     if not offset_list:
         offset_list = [safe_step]
 
-    base_time = row.get("end_time") or row.get("start_time")
+    base_time = trip_row.get("end_time") or trip_row.get("start_time")
 
     points: list[ForecastSpeedPoint] = []
     congested_offsets: list[int] = []
@@ -568,10 +829,9 @@ async def forecast_trip_speed_curve_xgboost(
                 target_time=target_time,
                 predicted_speed_kph=round(predicted_speed, 3),
                 predicted_intensity=round(mean_intensity, 4),
-                risk_level=risk,  # type: ignore[arg-type]
+                risk_level=risk,
             )
         )
-
     total_points = max(1, len(points))
     avg_speed = avg_speed_acc / total_points
     if min_speed == float("inf"):

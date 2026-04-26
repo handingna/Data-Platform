@@ -25,6 +25,15 @@ docker run -d -p 5433:5432 handingna/trajdb-image:m1v1
 ```
 密码：password
 
+mission1v2 下载镜像
+```bash
+docker pull handingna/trajdb-image:m1v2
+```
+
+```bash
+docker run -d -p 5433:5432 handingna/trajdb-image:m1v2
+```
+密码：password
 
 
 ## 2) 配置后端数据库连接
@@ -48,7 +57,7 @@ npm install
 后端（建议创建虚拟环境）：
 
 ```bash
-python -m venv .venv
+python -m venv .venv   #遇到有不存在的库可以使用py -3.10 -m venv .venv
 .\.venv\Scripts\activate
 pip install -r backend/requirements.txt
 ```
@@ -74,6 +83,13 @@ tips：requirements.txt可能不全，如果运行碰壁先自行解决一下，
 
 python backend/scripts/forecast_xgb_train.py --trip-limit 2000 --congestion-speed-kph 20 
 
+# 7) 连接新表后修改后的代码
+修改了以下三个文件：修改的部分都有注释：
+backend/app/car_portrait.py、
+backend/app/forecast_xgboost.py、
+backend/app/services.py
+
+功能都还可以正常使用，新表的四层结构的描述以及生成的sql语句放在了mission1_v2.md中.
 # 待实现功能及分工
 目前（2026.4.3）数据库我现在只传了一个数据集（jld2）进去（主要用于测试，后期再补），现在只有两张表
 ```

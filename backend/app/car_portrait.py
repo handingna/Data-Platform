@@ -425,74 +425,165 @@ def build_car_portrait_payload(
     )
 
 
+# async def fetch_car_trip_samples(db: AsyncSession, device_id: str) -> list[VehicleTripSample]:
+#     q_ids = text(
+#         """
+#         SELECT trip_ids
+#         FROM public.car
+#         WHERE device_id = :device_id
+#         LIMIT 1
+#         """
+#     )
+#     ids_row = (await db.execute(q_ids, {"device_id": device_id})).mappings().first()
+#     trip_ids = list((ids_row or {}).get("trip_ids") or [])
+#
+#     rows: list[Any] = []
+#     if trip_ids:
+#         q = text(
+#             """
+#             SELECT DISTINCT ON (trip_id)
+#                    trip_id,
+#                    log_date,
+#                    devid,
+#                    distance_km,
+#                    duration,
+#                    start_time,
+#                    end_time,
+#                    CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
+#                    CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
+#                    CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
+#                    CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
+#             FROM public.trip_data
+#             WHERE trip_id = ANY(:trip_ids)
+#             ORDER BY trip_id, log_date DESC
+#             """
+#         )
+#         rows = (await db.execute(q, {"trip_ids": trip_ids})).mappings().all()
+#     else:
+#         try:
+#             devid_num = int(device_id)
+#         except Exception:
+#             return []
+#
+#         q = text(
+#             """
+#             SELECT DISTINCT ON (trip_id)
+#                    trip_id,
+#                    log_date,
+#                    devid,
+#                    distance_km,
+#                    duration,
+#                    start_time,
+#                    end_time,
+#                    CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
+#                    CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
+#                    CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
+#                    CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
+#             FROM public.trip_data
+#             WHERE devid = :devid
+#             ORDER BY trip_id, log_date DESC
+#             """
+#         )
+#         rows = (await db.execute(q, {"devid": devid_num})).mappings().all()
+#
+#     return _sort_trip_samples([_sample_from_row(row) for row in rows])
 async def fetch_car_trip_samples(db: AsyncSession, device_id: str) -> list[VehicleTripSample]:
-    q_ids = text(
-        """
-        SELECT trip_ids
-        FROM public.car
-        WHERE device_id = :device_id
-        LIMIT 1
-        """
+    """
+    【修改说明】
+    从 DW 层 dw_fact_trip 获取车辆行程数据，
+    start_lon/start_lat/end_lon/end_lat 已预计算，
+    无需再展开数组。
+    """
+    q = text("""
+        SELECT trip_id, log_date, devid, distance_km, duration_seconds,
+               start_time, end_time, start_lon, start_lat, end_lon, end_lat
+        FROM dw_fact_trip
+        WHERE devid = :devid
+        ORDER BY start_time DESC
+    """)
+    try:
+        devid_num = int(device_id)
+    except Exception:
+        return []
+
+    rows = (await db.execute(q, {"devid": devid_num})).mappings().all()
+
+    return _sort_trip_samples([_sample_from_dw_row(row) for row in rows])
+
+
+def _sample_from_dw_row(row: Any) -> VehicleTripSample:
+    """从 dw_fact_trip 行构建 VehicleTripSample（替代 _sample_from_row）"""
+    start_point = None
+    if row.get("start_lon") is not None and row.get("start_lat") is not None:
+        start_point = (float(row["start_lon"]), float(row["start_lat"]))
+
+    end_point = None
+    if row.get("end_lon") is not None and row.get("end_lat") is not None:
+        end_point = (float(row["end_lon"]), float(row["end_lat"]))
+
+    return VehicleTripSample(
+        trip_id=int(row["trip_id"]),
+        device_id=str(row["devid"]),
+        log_date=row["log_date"],
+        distance_km=float(row.get("distance_km") or 0.0),
+        duration_seconds=float(row.get("duration_seconds")) if row.get("duration_seconds") is not None else None,
+        start_time=row.get("start_time"),
+        end_time=row.get("end_time"),
+        start_point=start_point,
+        end_point=end_point,
     )
-    ids_row = (await db.execute(q_ids, {"device_id": device_id})).mappings().first()
-    trip_ids = list((ids_row or {}).get("trip_ids") or [])
-
-    rows: list[Any] = []
-    if trip_ids:
-        q = text(
-            """
-            SELECT DISTINCT ON (trip_id)
-                   trip_id,
-                   log_date,
-                   devid,
-                   distance_km,
-                   duration,
-                   start_time,
-                   end_time,
-                   CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
-                   CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
-                   CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
-                   CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
-            FROM public.trip_data
-            WHERE trip_id = ANY(:trip_ids)
-            ORDER BY trip_id, log_date DESC
-            """
-        )
-        rows = (await db.execute(q, {"trip_ids": trip_ids})).mappings().all()
-    else:
-        try:
-            devid_num = int(device_id)
-        except Exception:
-            return []
-
-        q = text(
-            """
-            SELECT DISTINCT ON (trip_id)
-                   trip_id,
-                   log_date,
-                   devid,
-                   distance_km,
-                   duration,
-                   start_time,
-                   end_time,
-                   CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
-                   CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
-                   CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
-                   CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
-            FROM public.trip_data
-            WHERE devid = :devid
-            ORDER BY trip_id, log_date DESC
-            """
-        )
-        rows = (await db.execute(q, {"devid": devid_num})).mappings().all()
-
-    return _sort_trip_samples([_sample_from_row(row) for row in rows])
 
 
+# async def _fetch_peer_trip_samples(
+#     db: AsyncSession,
+#     device_ids: list[str],
+# ) -> dict[str, list[VehicleTripSample]]:
+#     numeric_ids: list[int] = []
+#     for device_id in device_ids:
+#         try:
+#             numeric_ids.append(int(device_id))
+#         except Exception:
+#             continue
+#
+#     if not numeric_ids:
+#         return {}
+#
+#     q = text(
+#         """
+#         SELECT DISTINCT ON (trip_id)
+#                trip_id,
+#                log_date,
+#                devid,
+#                distance_km,
+#                duration,
+#                start_time,
+#                end_time,
+#                CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
+#                CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
+#                CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
+#                CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
+#         FROM public.trip_data
+#         WHERE devid = ANY(:devids)
+#         ORDER BY trip_id, log_date DESC
+#         """
+#     )
+#     rows = (await db.execute(q, {"devids": numeric_ids})).mappings().all()
+#     grouped: dict[str, list[VehicleTripSample]] = defaultdict(list)
+#     for row in rows:
+#         sample = _sample_from_row(row)
+#         grouped[sample.device_id].append(sample)
+#
+#     for device_id, items in grouped.items():
+#         grouped[device_id] = _sort_trip_samples(items)
+#     return grouped
 async def _fetch_peer_trip_samples(
-    db: AsyncSession,
-    device_ids: list[str],
+        db: AsyncSession,
+        device_ids: list[str],
 ) -> dict[str, list[VehicleTripSample]]:
+    """
+    【修改说明】
+    改为从 DW 层批量查询同行车辆行程数据。
+    """
     numeric_ids: list[int] = []
     for device_id in device_ids:
         try:
@@ -503,54 +594,60 @@ async def _fetch_peer_trip_samples(
     if not numeric_ids:
         return {}
 
-    q = text(
-        """
-        SELECT DISTINCT ON (trip_id)
-               trip_id,
-               log_date,
-               devid,
-               distance_km,
-               duration,
-               start_time,
-               end_time,
-               CASE WHEN array_length(lon, 1) >= 1 THEN lon[1] END AS start_lon,
-               CASE WHEN array_length(lat, 1) >= 1 THEN lat[1] END AS start_lat,
-               CASE WHEN array_length(lon, 1) >= 1 THEN lon[array_length(lon, 1)] END AS end_lon,
-               CASE WHEN array_length(lat, 1) >= 1 THEN lat[array_length(lat, 1)] END AS end_lat
-        FROM public.trip_data
+    q = text("""
+        SELECT trip_id, log_date, devid, distance_km, duration_seconds,
+               start_time, end_time, start_lon, start_lat, end_lon, end_lat
+        FROM dw_fact_trip
         WHERE devid = ANY(:devids)
-        ORDER BY trip_id, log_date DESC
-        """
-    )
+        ORDER BY devid, start_time DESC
+    """)
     rows = (await db.execute(q, {"devids": numeric_ids})).mappings().all()
+
     grouped: dict[str, list[VehicleTripSample]] = defaultdict(list)
     for row in rows:
-        sample = _sample_from_row(row)
+        sample = _sample_from_dw_row(row)
         grouped[sample.device_id].append(sample)
 
     for device_id, items in grouped.items():
         grouped[device_id] = _sort_trip_samples(items)
     return grouped
 
+# async def _fetch_top_peer_device_ids(
+#     db: AsyncSession,
+#     current_device_id: str,
+#     limit: int = 120,
+# ) -> list[str]:
+#     q = text(
+#         """
+#         SELECT device_id
+#         FROM public.car
+#         WHERE trips_total > 0 AND device_id <> :device_id
+#         ORDER BY trips_total DESC, total_distance DESC, device_id
+#         LIMIT :limit
+#         """
+#     )
+#     rows = (await db.execute(q, {"device_id": current_device_id, "limit": limit})).all()
+#     return [str(row[0]) for row in rows]
 
 async def _fetch_top_peer_device_ids(
     db: AsyncSession,
     current_device_id: str,
     limit: int = 120,
 ) -> list[str]:
-    q = text(
-        """
+    """
+    【修改说明】
+    改为从 DW 层 dw_dim_car 查询同行车辆，
+    dw_dim_car 有预计算的 total_trips 和 total_distance_km。
+    """
+    q = text("""
         SELECT device_id
-        FROM public.car
-        WHERE trips_total > 0 AND device_id <> :device_id
-        ORDER BY trips_total DESC, total_distance DESC, device_id
+        FROM dw_dim_car
+        WHERE total_trips > 0 AND device_id <> :device_id
+        ORDER BY total_trips DESC, total_distance_km DESC, device_id
         LIMIT :limit
-        """
-    )
+    """)
     rows = (await db.execute(q, {"device_id": current_device_id, "limit": limit})).all()
     return [str(row[0]) for row in rows]
-
-
 async def fetch_car_portrait(
     db: AsyncSession,
     device_id: str,
